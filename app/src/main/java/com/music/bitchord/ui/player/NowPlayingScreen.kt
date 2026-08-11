@@ -870,8 +870,18 @@ private fun LyricsPanel(
     }
 
     // Follow the song, keeping the active line a third of the way down.
+    //
+    // Gated on isScrollInProgress as well as browsing: browsing flips true from
+    // a Flow collecting DragInteraction.Start, which lags a frame or two behind
+    // the actual touch. A line change landing in that gap started this
+    // animated scroll underneath a finger already dragging, and the ensuing
+    // fight over the list's MutatorMutex was what leaked a stray scroll past
+    // keepScrollInList and down to the sheet — reading the list's own
+    // (synchronous) scroll state closes that window.
     LaunchedEffect(activeLine, browsing) {
-        if (!browsing && activeLine >= 0 && activeLine in lines.indices) {
+        if (!browsing && !listState.isScrollInProgress &&
+            activeLine >= 0 && activeLine in lines.indices
+        ) {
             listState.animateScrollToItem(activeLine, scrollOffset = -180)
         }
     }
