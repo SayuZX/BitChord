@@ -33,6 +33,7 @@ import com.music.bitchord.R
 import com.music.bitchord.data.Http
 import com.music.bitchord.data.NerdStats
 import com.music.bitchord.data.innertube.PlaybackTracker
+import com.music.bitchord.data.innertube.PlayerClient
 import com.music.bitchord.data.innertube.StreamResolver
 import com.music.bitchord.data.settings.AppSettings
 import kotlinx.coroutines.CoroutineScope
@@ -41,6 +42,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -67,7 +69,18 @@ class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private var player: ExoPlayer? = null
     private var crossfade: CrossfadeController? = null
+    private val spatialAudioProcessor = SpatialAudioProcessor()
+
+    /**
+     * The crossfade's tail player runs its own audio sink, so it needs its own
+     * instance of the effect — [SpatialAudioProcessor] carries a delay line and
+     * filter state that two sinks cannot share.
+     */
+    private val ghostSpatialAudioProcessor = SpatialAudioProcessor()
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+    /** Shared with the crossfade's tail player, so both read the same disk cache. */
+    private var mediaSourceFactory: DefaultMediaSourceFactory? = null
 
     /** Last sampled position of the playing track, in seconds. */
     private var lastPositionSeconds = 0L
@@ -83,24 +96,37 @@ class PlaybackService : MediaSessionService() {
                 .apply { setSmallIcon(R.drawable.ic_notification_logo) },
         )
 
+        // No user agent on the factory: the right one depends on which client
+        // minted the URL, so it is set per request below. Setting it here as
+        // well would not override that — OkHttpDataSource *appends* the
+        // factory's agent after the request's, and the fetch would go out
+        // carrying two contradictory User-Agent headers.
         val resolvingFactory = ResolvingDataSource.Factory(
-            OkHttpDataSource.Factory(Http.client)
-                // Match the client identity that minted the URL.
-                .setUserAgent(Http.IOS_USER_AGENT),
+            // Innermost, so it chunks the real googlevideo URL the resolver
+            // below has already substituted in — see [ChunkedDataSource] for
+            // why an open-ended read of one is worth avoiding.
+            ChunkedDataSource.Factory(OkHttpDataSource.Factory(Http.client), STREAM_CHUNK_BYTES),
         ) { dataSpec ->
             val videoId = dataSpec.uri.getQueryParameter("v")
                 ?: return@Factory dataSpec
             val streamUrl = runBlocking { StreamResolver.resolve(videoId) }
-            dataSpec.withUri(Uri.parse(streamUrl))
+            dataSpec.buildUpon()
+                .setUri(Uri.parse(streamUrl))
+                // googlevideo names the client that minted the URL inside the
+                // URL itself, and compares it against the request that comes
+                // back for the bytes. A mismatch is answered with a throttled
+                // trickle or a 403 rather than an error worth the name, so the
+                // fetch is dressed as whatever the URL says it should be.
+                .setHttpRequestHeaders(PlayerClient.forStreamUrl(streamUrl).mediaHeaders())
+                .build()
         }
         // Read-ahead resolves streams through the same chain the player does.
         AudioCache.setUpstream(resolvingFactory)
+        mediaSourceFactory = DefaultMediaSourceFactory(AudioCache.playbackFactory(resolvingFactory))
 
         val exoPlayer = ExoPlayer.Builder(this)
-            .setRenderersFactory(silenceSkippingRenderers())
-            .setMediaSourceFactory(
-                DefaultMediaSourceFactory(AudioCache.playbackFactory(resolvingFactory)),
-            )
+            .setRenderersFactory(silenceSkippingRenderers(spatialAudioProcessor))
+            .setMediaSourceFactory(requireNotNull(mediaSourceFactory))
             .setLoadControl(farBufferingLoadControl())
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -143,7 +169,14 @@ class PlaybackService : MediaSessionService() {
                 // "Sleep after this song": the queue moving on by itself is the
                 // moment the track the user meant has finished. REPEAT counts
                 // too, or the timer would never fire with repeat-one on.
-                val ended = reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+                //
+                // A crossfade arrives as a SEEK, because moving the queue on
+                // early is exactly how it starts the next track while the last
+                // one is still fading. Indistinguishable from a manual skip
+                // from here, so the crossfade says which of the two it was.
+                val crossfaded = crossfade?.consumeAutoAdvance() == true
+                val ended = crossfaded ||
+                    reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
                     reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
                 if (ended && SleepTimer.afterTrack.value) {
                     exoPlayer.pause()
@@ -189,13 +222,56 @@ class PlaybackService : MediaSessionService() {
 
         reportProgress(exoPlayer)
 
-        crossfade = CrossfadeController(scope, exoPlayer).also { it.start() }
+        val controller = CrossfadeController(scope, exoPlayer, ::buildGhostPlayer)
+        crossfade = controller
+        controller.start()
 
-        mediaSession = MediaSession.Builder(this, RestartingBackPlayer(exoPlayer))
+        mediaSession = MediaSession.Builder(this, SessionPlayer(exoPlayer, controller))
             .setId(SESSION_ID)
             .setSessionActivity(sessionActivity())
             .build()
     }
+
+    /**
+     * The crossfade's tail player: plays out the last seconds of the track
+     * being left behind while the real player gets on with the next one.
+     *
+     * Deliberately not a second copy of the main player:
+     *
+     *  - **No audio focus.** Focus belongs to the session player, and two
+     *    requests from one app mean the second replaces the first — the ghost
+     *    abandoning focus as it finishes would take the whole app's focus with
+     *    it.
+     *  - **No "becoming noisy" handling, no wake mode, no session.** Unplugging
+     *    headphones pauses the session player, and the ghost dies with the fade
+     *    that owns it; a second component reacting to the same events would
+     *    only ever fight the first.
+     *  - **Same audio session id**, so the system equalizer and any other
+     *    effects attached to the app apply to the tail as well as to the track
+     *    fading up. Without it a crossfade would audibly change EQ halfway.
+     *
+     * It shares the media source factory, so the tail is served from the same
+     * on-disk cache the track was just playing from rather than re-resolving a
+     * stream URL for audio that is already local.
+     */
+    private fun buildGhostPlayer(): ExoPlayer = ExoPlayer.Builder(this)
+        .setRenderersFactory(silenceSkippingRenderers(ghostSpatialAudioProcessor))
+        .setMediaSourceFactory(requireNotNull(mediaSourceFactory))
+        .setLoadControl(farBufferingLoadControl())
+        .setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                .build(),
+            /* handleAudioFocus = */ false,
+        )
+        .build()
+        .also { ghost ->
+            player?.let { ghost.audioSessionId = it.audioSessionId }
+            ghost.skipSilenceEnabled = AppSettings.skipSilence.value
+            ghost.setPlaybackSpeed(AppSettings.playbackSpeed.value)
+            ghostSpatialAudioProcessor.enabled = DolbyAtmos.spatialAudioActive
+        }
 
     /**
      * Where a tap on the session lands. Media3 uses this both as the media
@@ -353,21 +429,27 @@ class PlaybackService : MediaSessionService() {
      * listener waits for sound:
      *
      *  - **Back buffer.** Media3 keeps nothing behind the playhead, so a seek
-     *    *backwards* always drops the buffer and reloads, while a seek forwards
-     *    lands in samples already held and resumes at once. The reload is the
-     *    expensive half: it restarts at the WebM cue point before the target —
-     *    YouTube spaces those ten seconds apart — and everything from there to
-     *    where the listener actually asked for has to go through the decoder
-     *    and be thrown away, at roughly 130ms of waiting per second skipped.
-     *    That asymmetry is what makes scrubbing back feel broken. Since a whole
-     *    track is only a few megabytes of Opus, keeping all of it behind the
-     *    playhead makes a backward seek exactly what a forward one already is:
-     *    an in-buffer seek, no reload and no discarded decoding at all.
+     *    *backwards* drops the buffer and reloads, while a seek forwards lands
+     *    in samples already held. Half a minute of history closes that gap for
+     *    the seek people actually make — nudging back a few seconds to catch a
+     *    lyric — and it is deliberately no longer than that. The byte ceiling
+     *    above counts *everything* the player holds, history included, so a
+     *    back buffer wide enough to keep a whole track would spend the entire
+     *    read-ahead budget on audio already heard: past the ceiling, loading
+     *    stops, and since every second played moves a second from the front of
+     *    the buffer to the back, the total never falls again and it never
+     *    restarts. Read-ahead collapses and the track stalls every couple of
+     *    seconds for the rest of its length. Seeking further back than this
+     *    window is a disk read anyway, not a network one — [AudioCache] has
+     *    written every byte already played.
      *  - **Thresholds to (re)start playback.** The defaults — 2.5s of audio
      *    before starting, 5s before resuming after a rebuffer — are sized for
      *    streaming video over a network that might stall again. Here the bytes
-     *    are almost always already on disk, so those seconds are spent waiting
-     *    on a buffer that fills instantly and are simply dead air after a seek.
+     *    are usually already on disk, so those seconds are spent waiting on a
+     *    buffer that fills instantly and are simply dead air after a seek.
+     *    Resuming is given more room than starting: a stall means the network
+     *    is genuinely struggling, and coming back with a second of audio in
+     *    hand only buys the next stall.
      */
     private fun farBufferingLoadControl() = DefaultLoadControl.Builder()
         .setBufferDurationsMs(
@@ -390,7 +472,7 @@ class PlaybackService : MediaSessionService() {
      * track. Everything else about the chain stays default, so
      * `skipSilenceEnabled` keeps driving it as before.
      */
-    private fun silenceSkippingRenderers() = object : DefaultRenderersFactory(this) {
+    private fun silenceSkippingRenderers(spatial: SpatialAudioProcessor) = object : DefaultRenderersFactory(this) {
         override fun buildAudioSink(
             context: Context,
             enableFloatOutput: Boolean,
@@ -400,7 +482,7 @@ class PlaybackService : MediaSessionService() {
             .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
             .setAudioProcessorChain(
                 DefaultAudioSink.DefaultAudioProcessorChain(
-                    emptyArray(),
+                    arrayOf(spatial),
                     SilenceSkippingAudioProcessor(
                         MIN_SILENCE_US,
                         SilenceSkippingAudioProcessor.DEFAULT_SILENCE_RETENTION_RATIO,
@@ -418,6 +500,7 @@ class PlaybackService : MediaSessionService() {
     private fun applySettings(player: ExoPlayer) {
         player.skipSilenceEnabled = AppSettings.skipSilence.value
         player.setPlaybackSpeed(AppSettings.playbackSpeed.value)
+        spatialAudioProcessor.enabled = DolbyAtmos.spatialAudioActive
     }
 
     private fun observeSettings() {
@@ -426,6 +509,20 @@ class PlaybackService : MediaSessionService() {
         }
         scope.launch {
             AppSettings.playbackSpeed.collect { player?.setPlaybackSpeed(it) }
+        }
+        // Spatial audio is the user's switch *and* the device's: Atmos going
+        // off in system settings mid-track has to stop the effect, not wait for
+        // the next track or the next launch.
+        scope.launch {
+            combine(
+                AppSettings.spatialAudio,
+                DolbyAtmos.supported,
+                DolbyAtmos.enabledOnDevice,
+            ) { wanted, supported, atmosOn -> wanted && supported && atmosOn }
+                .collect {
+                    spatialAudioProcessor.enabled = it
+                    ghostSpatialAudioProcessor.enabled = it
+                }
         }
     }
 
@@ -447,15 +544,24 @@ class PlaybackService : MediaSessionService() {
     }
 
     /**
-     * Makes the notification, lockscreen and Bluetooth back buttons agree with
-     * the one in the app.
+     * What the MediaSession, and so every control surface, actually talks to.
      *
-     * ExoPlayer already implements restart-then-skip in [Player.seekToPrevious],
-     * gated on `maxSeekToPreviousPosition`. Those external surfaces don't use
-     * it: [DefaultMediaNotificationProvider] binds its previous button to
+     * Two behaviours are grafted onto the player here rather than left to
+     * ExoPlayer's defaults:
+     *
+     * **Back restarts the track.** ExoPlayer already implements
+     * restart-then-skip in [Player.seekToPrevious], gated on
+     * `maxSeekToPreviousPosition`. External surfaces don't use it:
+     * [DefaultMediaNotificationProvider] binds its previous button to
      * `COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM`, which skips unconditionally. So
-     * that command is redirected here rather than left to behave differently
+     * that command is redirected rather than left to behave differently
      * depending on which back button was pressed.
+     *
+     * **A skip cancels the crossfade.** Blending is for a track running out,
+     * not for one being changed: told to move on, the listener wants the song
+     * they were on to stop, not to keep playing over the one they asked for.
+     * So every skip tells [CrossfadeController] to drop whatever is in flight
+     * and then moves the queue plainly.
      *
      * Command availability is deliberately untouched — mutating it through a
      * [ForwardingPlayer] means intercepting listener callbacks too. The one
@@ -464,8 +570,25 @@ class PlaybackService : MediaSessionService() {
      * stays inert on those surfaces, exactly as it already was. In the app it
      * restarts, since that path asks for `COMMAND_SEEK_TO_PREVIOUS`.
      */
-    private class RestartingBackPlayer(player: Player) : ForwardingPlayer(player) {
-        override fun seekToPreviousMediaItem() = wrappedPlayer.seekToPrevious()
+    private class SessionPlayer(
+        player: Player,
+        private val crossfade: CrossfadeController,
+    ) : ForwardingPlayer(player) {
+
+        override fun seekToPreviousMediaItem() {
+            crossfade.onSkipRequested()
+            wrappedPlayer.seekToPrevious()
+        }
+
+        override fun seekToNextMediaItem() {
+            crossfade.onSkipRequested()
+            wrappedPlayer.seekToNextMediaItem()
+        }
+
+        override fun seekToNext() {
+            crossfade.onSkipRequested()
+            wrappedPlayer.seekToNext()
+        }
     }
 
     private companion object {
@@ -474,6 +597,12 @@ class PlaybackService : MediaSessionService() {
 
         /** How often played-seconds are sampled off the player. */
         const val PROGRESS_SAMPLE_MS = 5_000L
+
+        /**
+         * Size of each range the player fetches. The same figure read-ahead
+         * uses, and for the same reason — see [ChunkedDataSource].
+         */
+        const val STREAM_CHUNK_BYTES = 2L * 1024 * 1024
 
         /** Shortest gap "skip silence" is allowed to touch. */
         const val MIN_SILENCE_US = 1_000_000L
@@ -484,13 +613,16 @@ class PlaybackService : MediaSessionService() {
         /** ~6 minutes at 160kbps: a whole track, for all but the longest. */
         const val FAR_BUFFER_BYTES = 8 * 1024 * 1024
 
-        /** Past any song, so a seek back lands in the buffer rather than re-reading. */
-        const val BACK_BUFFER_MS = 15 * 60 * 1000
+        /**
+         * A short nudge backwards, and no more: this shares the byte ceiling
+         * above with the read-ahead it would otherwise starve.
+         */
+        const val BACK_BUFFER_MS = 30 * 1000
 
         /** Enough to cover the decoder's own latency, not seconds of dead air. */
         const val START_PLAYBACK_MS = 500
 
-        /** Same again after a seek or a stall — the bytes are usually on disk. */
-        const val RESUME_PLAYBACK_MS = 1_000
+        /** More room after a stall than at the start — see the load control. */
+        const val RESUME_PLAYBACK_MS = 2_000
     }
 }

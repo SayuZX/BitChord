@@ -28,8 +28,8 @@ android {
         // Haze falls back to a translucent scrim below that.
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -136,7 +136,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     // ---- Stream resolution: NewPipe solves YouTube's signature + `n` throttling ----
-    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.3")
+    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.4")
 
     // ---- Auth/session storage ----
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
