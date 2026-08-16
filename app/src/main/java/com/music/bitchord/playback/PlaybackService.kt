@@ -85,8 +85,10 @@ class PlaybackService : MediaSessionService() {
 
     private var scrobbleManager: ScrobbleManager? = null
     private var listenBrainzSong: Song? = null
+
     private var listenBrainzStartMs: Long = 0L
 
+    private var listenBrainzDurationMs: Long? = null
     /**
      * The crossfade's tail player runs its own audio sink, so it needs its own
      * instance of the effect — [SpatialAudioProcessor] carries a delay line and
@@ -180,6 +182,18 @@ class PlaybackService : MediaSessionService() {
                 val song = exoPlayer.currentMediaItem?.toSong()
                 val durationMs = exoPlayer.duration.takeIf { it > 0 }
                 scrobbleManager?.onPlayerStateChanged(isPlaying, song, durationMs)
+
+                // ListenBrainz: "now playing" on play/resume too, not just on
+                // transition — a track started from idle or resumed from pause
+                // otherwise stays silent on the site.
+                if (isPlaying && song != null) {
+                    if (listenBrainzSong == null) {
+                        listenBrainzSong = song
+                        listenBrainzStartMs = System.currentTimeMillis()
+                        listenBrainzDurationMs = durationMs
+                    }
+                    submitListenBrainzPlayingNow(song, exoPlayer.currentPosition, durationMs)
+                }
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -194,43 +208,30 @@ class PlaybackService : MediaSessionService() {
                 val durationMs = exoPlayer.duration.takeIf { it > 0 }
                 scrobbleManager?.onSongStart(newSong, durationMs)
 
-                // ListenBrainz: submit finished for old song, playing_now for new song
+                // ListenBrainz: submit finished for old song, playing_now for new song.
+                // The finished listen only counts when the track actually ended —
+                // an auto-advance, a repeat, or a crossfade at the very end. A
+                // manual skip (SEEK) means the song wasn't listened to, so it must
+                // not be scrobbled.
+                val crossfaded = crossfade?.consumeAutoAdvance() == true
+                val ended = crossfaded ||
+                    reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+                    reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
                 val prevSong = listenBrainzSong
                 val prevStart = listenBrainzStartMs
-                if (prevSong != null) {
-                    val lbEnabled = AppSettings.listenBrainzEnabled.value
-                    val lbToken = AppSettings.listenBrainzToken.value
-                    if (lbEnabled && lbToken.isNotBlank()) {
-                        val endMs = System.currentTimeMillis()
-                        scope.launch {
-                            ListenBrainzManager.submitFinished(lbToken, prevSong, prevStart, endMs)
-                        }
-                    }
+                if (prevSong != null && ended) {
+                    submitListenBrainzFinished(prevSong, prevStart, listenBrainzDurationMs)
                 }
                 listenBrainzSong = newSong
                 listenBrainzStartMs = System.currentTimeMillis()
+                listenBrainzDurationMs = durationMs
                 if (newSong != null) {
-                    val lbEnabled = AppSettings.listenBrainzEnabled.value
-                    val lbToken = AppSettings.listenBrainzToken.value
-                    if (lbEnabled && lbToken.isNotBlank()) {
-                        scope.launch {
-                            ListenBrainzManager.submitPlayingNow(lbToken, newSong, 0L)
-                        }
-                    }
+                    submitListenBrainzPlayingNow(newSong, 0L, durationMs)
                 }
 
                 // "Sleep after this song": the queue moving on by itself is the
                 // moment the track the user meant has finished. REPEAT counts
                 // too, or the timer would never fire with repeat-one on.
-                //
-                // A crossfade arrives as a SEEK, because moving the queue on
-                // early is exactly how it starts the next track while the last
-                // one is still fading. Indistinguishable from a manual skip
-                // from here, so the crossfade says which of the two it was.
-                val crossfaded = crossfade?.consumeAutoAdvance() == true
-                val ended = crossfaded ||
-                    reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
-                    reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
                 if (ended && SleepTimer.afterTrack.value) {
                     exoPlayer.pause()
                     SleepTimer.cancel()
@@ -246,7 +247,19 @@ class PlaybackService : MediaSessionService() {
             // Nothing follows the last track, so there is no transition to
             // pause on — the queue simply runs out and the timer is spent.
             override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_ENDED) SleepTimer.cancel()
+                if (state == Player.STATE_ENDED) {
+                    SleepTimer.cancel()
+                    // The last track finished with nothing after it, so no
+                    // transition will ever close it out. Scrobble it now.
+                    val lastSong = listenBrainzSong
+                    if (lastSong != null) {
+                        val lastStart = listenBrainzStartMs
+                        val lastDuration = listenBrainzDurationMs
+                            ?: exoPlayer.duration.takeIf { it > 0 }
+                        submitListenBrainzFinished(lastSong, lastStart, lastDuration)
+                        listenBrainzSong = null
+                    }
+                }
             }
 
             /**
@@ -647,6 +660,31 @@ class PlaybackService : MediaSessionService() {
         val delaySeconds: Int,
     )
 
+    /**
+     * Submits a finished ListenBrainz listen, but only if the service is
+     * actually scrobbling — the settings are read at call time so the helper
+     * stays a no-op whenever ListenBrainz is switched off.
+     */
+    private fun submitListenBrainzFinished(song: Song, startMs: Long, durationMs: Long?) {
+        val lbEnabled = AppSettings.listenBrainzEnabled.value
+        val lbToken = AppSettings.listenBrainzToken.value
+        if (!lbEnabled || lbToken.isBlank()) return
+        val endMs = System.currentTimeMillis()
+        scope.launch {
+            ListenBrainzManager.submitFinished(lbToken, song, startMs, endMs, durationMs)
+        }
+    }
+
+    /** Sends a ListenBrainz "now playing" update for the current track. */
+    private fun submitListenBrainzPlayingNow(song: Song, positionMs: Long, durationMs: Long?) {
+        val lbEnabled = AppSettings.listenBrainzEnabled.value
+        val lbToken = AppSettings.listenBrainzToken.value
+        if (!lbEnabled || lbToken.isBlank()) return
+        scope.launch {
+            ListenBrainzManager.submitPlayingNow(lbToken, song, positionMs, durationMs)
+        }
+    }
+
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? =
         mediaSession
 
@@ -654,6 +692,25 @@ class PlaybackService : MediaSessionService() {
         // Last chance to record the resume point, while the player still exists.
         saveQueue()
         AudioCache.cancel()
+        // Also the last chance to close out the track that was playing — a
+        // swipe-away or stop never fires STATE_ENDED, so the session would
+        // otherwise end with an un-scrobbled song. This must not ride on the
+        // service scope: it is cancelled a few lines down, and the request
+        // should still reach ListenBrainz.
+        val lastSong = listenBrainzSong
+        if (lastSong != null) {
+            val lbEnabled = AppSettings.listenBrainzEnabled.value
+            val lbToken = AppSettings.listenBrainzToken.value
+            if (lbEnabled && lbToken.isNotBlank()) {
+                val lastStart = listenBrainzStartMs
+                val lastDuration = player?.duration?.takeIf { it > 0 }
+                CoroutineScope(Dispatchers.IO).launch {
+                    ListenBrainzManager.submitFinished(
+                        lbToken, lastSong, lastStart, System.currentTimeMillis(), lastDuration,
+                    )
+                }
+            }
+        }
         scrobbleManager?.destroy()
         scrobbleManager = null
         scope.cancel()
