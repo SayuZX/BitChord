@@ -5,6 +5,7 @@ import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -309,6 +310,8 @@ fun NowPlayingScreen(
     var queueOpen by remember { mutableStateOf(false) }
     var lyricsOpen by remember { mutableStateOf(false) }
     LaunchedEffect(song.videoId) { lyricsOpen = false }
+
+    BackHandler(enabled = lyricsOpen) { lyricsOpen = false }
 
     // Which line is playing right now: the last one whose stamp has passed.
     val activeLine = remember(lyrics, positionMs) {
