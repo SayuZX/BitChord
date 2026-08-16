@@ -30,7 +30,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -630,7 +630,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                 }
                 if (!showSettings && !showAccountScrobbling) IconButton(onClick = { showSettings = true }) {
                     Icon(
-                        Icons.Rounded.MoreVert,
+                        Icons.Rounded.Settings,
                         contentDescription = "Settings",
                         tint = MaterialTheme.colorScheme.onBackground,
                     )
