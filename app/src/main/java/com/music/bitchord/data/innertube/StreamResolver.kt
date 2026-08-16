@@ -365,11 +365,14 @@ object StreamResolver {
      * a good one until something reads from it; hand it to ExoPlayer and the
      * failure surfaces as a track that spins and never starts.
      *
-     * A real range, not `bytes=0-0`. A single byte is not a test: a URL minted
-     * for a session Google has reservations about will serve one to anybody and
-     * then refuse every request large enough to be actual listening, so a
-     * one-byte probe passes exactly the URLs this exists to catch. Sixteen
-     * kilobytes is past that line and still one cheap round trip.
+     * The range has to be as large as the real fetch will ask for, not a token
+     * one. A URL minted for a session Google has reservations about serves
+     * small ranges to anybody — enough to pass a small probe — and then refuses
+     * the multi-megabyte ranges actual listening is made of with a 403.
+     * [PROBE_RANGE_BYTES] matches the chunk size the player and read-ahead
+     * fetch with, so a grudging URL fails here instead of on the playback path.
+     * Sixteen kilobytes of the answer still have to actually arrive, so a
+     * response that stalls after its headers is a failure too.
      *
      * The headers are the ones the media fetch will really use — see
      * [PlayerClient.forStreamUrl] — so this tests the request that matters
@@ -377,7 +380,7 @@ object StreamResolver {
      */
     private fun probe(url: String): Probe {
         val builder = okhttp3.Request.Builder().url(url)
-            .header("Range", "bytes=0-${PROBE_BYTES - 1}")
+            .header("Range", "bytes=0-${PROBE_RANGE_BYTES - 1}")
         PlayerClient.forStreamUrl(url).mediaHeaders().forEach { (name, value) ->
             builder.header(name, value)
         }
@@ -391,9 +394,9 @@ object StreamResolver {
                     response.header("Content-Type")?.startsWith("audio/") != true -> Probe.REFUSED
                     // Headers can arrive long before a body that never does —
                     // exactly the shaping this whole path exists to sidestep.
-                    // Insisting on the whole range is the point: a trickle that
+                    // Insisting on the bytes is the point: a trickle that
                     // yields its first byte and stalls is a failure too.
-                    response.body?.source()?.request(PROBE_BYTES) != true -> Probe.UNREACHABLE
+                    response.body?.source()?.request(PROBE_READ_BYTES) != true -> Probe.UNREACHABLE
                     else -> Probe.OK
                 }
             }
@@ -422,8 +425,18 @@ object StreamResolver {
 
     private const val PROBE_TIMEOUT_SECONDS = 6L
 
-    /** Past what a grudging URL will serve, well under what any track holds. */
-    private const val PROBE_BYTES = 16L * 1024
+    /**
+     * How much the probe asks for, in one range.
+     *
+     * Has to match what the real fetch asks for ([ChunkedDataSource] and
+     * [AudioCache] both fetch two-megabyte ranges), or a URL that grudges real
+     * listening-sized requests — while still serving token ones — sails through
+     * the probe and dies on the playback path instead.
+     */
+    private const val PROBE_RANGE_BYTES = 2L * 1024 * 1024
+
+    /** How much of the answer must actually arrive, to catch a stalled body. */
+    private const val PROBE_READ_BYTES = 16L * 1024
 
     // ---- Clients stood down -------------------------------------------------
 
