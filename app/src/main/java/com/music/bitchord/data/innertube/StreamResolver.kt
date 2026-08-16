@@ -72,8 +72,13 @@ object StreamResolver {
      * not globally — an identity refused on one connection is served on
      * another — which is the whole reason this is a list and why the order is
      * only a starting guess that [clientOrder] corrects from experience.
+     *
+     * TVHTML5 (Cobalt v7) is first because it works on flagged IPs without
+     * PO Token — the most reliable client as of July 2026.
      */
     private val CLIENTS = listOf(
+        PlayerClient.ANDROID_MUSIC,
+        PlayerClient.TVHTML5,
         PlayerClient.ANDROID_VR,
         PlayerClient.ANDROID_VR_LEGACY,
         PlayerClient.IOS,
