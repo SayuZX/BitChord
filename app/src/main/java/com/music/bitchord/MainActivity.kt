@@ -67,6 +67,7 @@ import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.model.UiState
 import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.settings.ThemeMode
+import com.music.bitchord.ui.screens.AccountAndScrobblingScreen
 import com.music.bitchord.ui.screens.SettingsScreen
 import com.music.bitchord.playback.QueueBuilder
 import com.music.bitchord.playback.QueueShuffle
@@ -128,6 +129,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     var showNowPlaying by remember { mutableStateOf(false) }
     var showLogin by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showAccountScrobbling by remember { mutableStateOf(false) }
     var songActions by remember { mutableStateOf<Song?>(null) }
     val autoplay by AppSettings.autoplay.collectAsStateWithLifecycle()
 
@@ -181,6 +183,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     // selected. A pushed album/artist page (from the player, search, etc.)
     // should surface above it rather than being hidden behind it.
     LaunchedEffect(detail) { if (detail != null) showSettings = false }
+    LaunchedEffect(showSettings) { if (!showSettings) showAccountScrobbling = false }
 
     val controller = rememberMediaController()
     val player = rememberPlayerState(controller)
@@ -240,7 +243,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     val libraryPull = rememberPullToRefreshState()
     val refreshing by viewModel.refreshing.collectAsStateWithLifecycle()
     val currentFeed = when {
-        showSettings || detail != null -> null
+        showSettings || showAccountScrobbling || detail != null -> null
         selectedTab == TAB_HOME -> MainViewModel.Feed.HOME
         selectedTab == TAB_EXPLORE -> MainViewModel.Feed.EXPLORE
         selectedTab == TAB_LIBRARY -> MainViewModel.Feed.LIBRARY
@@ -385,11 +388,15 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
         // A pushed album/artist/playlist page replaces the tab content but
         // leaves the tab bar and mini player in place.
         BackHandler(enabled = detail != null) { viewModel.closeDetail() }
+        BackHandler(enabled = detail == null && showAccountScrobbling) {
+            showAccountScrobbling = false
+        }
         // One back step out of Settings, or out of any tab but Home, lands on
         // Home rather than exiting — only Home itself hands back to the system,
         // which is what actually closes/minimizes the app.
-        BackHandler(enabled = detail == null && showSettings) {
+        BackHandler(enabled = detail == null && showSettings && !showAccountScrobbling) {
             showSettings = false
+            showAccountScrobbling = false
             selectedTab = TAB_HOME
         }
         BackHandler(enabled = detail == null && !showSettings && selectedTab != TAB_HOME) {
@@ -399,6 +406,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
 
         AnimatedContent(
             targetState = when {
+                showAccountScrobbling -> "account_scrobbling"
                 showSettings -> "settings"
                 detail != null -> detail.browseId
                 else -> "tab:$selectedTab"
@@ -407,8 +415,20 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
             modifier = Modifier.hazeSource(hazeState),
             label = "content",
         ) { key ->
-            val page = detailStack.lastOrNull()?.takeIf { it.browseId == key && key != "settings" }
-            if (key == "settings") {
+            val page = detailStack.lastOrNull()?.takeIf { it.browseId == key && key != "settings" && key != "account_scrobbling" }
+            if (key == "account_scrobbling") {
+                AccountAndScrobblingScreen(
+                    signedIn = signedIn,
+                    account = account,
+                    onSignIn = {
+                        showAccountScrobbling = false
+                        showSettings = false
+                        showLogin = true
+                    },
+                    onSignOut = { viewModel.signOut() },
+                    contentPadding = listPadding,
+                )
+            } else if (key == "settings") {
                 SettingsScreen(
                     signedIn = signedIn,
                     account = account,
@@ -417,6 +437,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                         showLogin = true
                     },
                     onSignOut = { viewModel.signOut() },
+                    onAccountScrobbling = { showAccountScrobbling = true },
                     contentPadding = listPadding,
                 )
             } else if (page != null) {
@@ -570,6 +591,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
 
         FrostedTopBar(
             title = when {
+                showAccountScrobbling -> "Account & scrobbling"
                 showSettings -> "Settings"
                 detail != null -> detail.title
                 else -> tabs[selectedTab].let {
@@ -579,11 +601,12 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
             hazeState = hazeState,
             // Search has no large in-list header to hand the title back to —
             // the field takes that space — so its bar title is always up.
-            scrolled = scrolled || detail != null || showSettings ||
+            scrolled = scrolled || detail != null || showSettings || showAccountScrobbling ||
                 selectedTab == TAB_SEARCH,
             refreshing = currentFeed != null && currentFeed in refreshing,
             pullFraction = { currentPull?.distanceFraction ?: 0f },
             onBack = when {
+                showAccountScrobbling -> ({ showAccountScrobbling = false })
                 showSettings -> ({ showSettings = false })
                 detail != null -> ({ viewModel.closeDetail(); Unit })
                 else -> null
@@ -592,7 +615,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
             actions = {
                 // Only worth surfacing where there's room for it and it won't
                 // be mistaken for a per-page action — Home, at rest.
-                if (!showSettings && detail == null && selectedTab == TAB_HOME) {
+                if (!showSettings && !showAccountScrobbling && detail == null && selectedTab == TAB_HOME) {
                     updateNotice?.let { update ->
                         IconButton(onClick = {
                             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.releaseUrl)))
@@ -605,7 +628,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                         }
                     }
                 }
-                if (!showSettings) IconButton(onClick = { showSettings = true }) {
+                if (!showSettings && !showAccountScrobbling) IconButton(onClick = { showSettings = true }) {
                     Icon(
                         Icons.Rounded.MoreVert,
                         contentDescription = "Settings",
@@ -652,6 +675,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                     // switching tabs.
                     viewModel.clearDetail()
                     showSettings = false
+                    showAccountScrobbling = false
                     selectedTab = it
                 },
             )

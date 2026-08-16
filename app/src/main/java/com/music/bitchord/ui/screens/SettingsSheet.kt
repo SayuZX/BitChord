@@ -30,8 +30,10 @@ import androidx.compose.material.icons.rounded.BlurOff
 import androidx.compose.material.icons.rounded.Brightness4
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.MotionPhotosOff
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.SignalCellularAlt
@@ -41,20 +43,24 @@ import androidx.compose.material.icons.rounded.SurroundSound
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Waves
 import androidx.compose.material.icons.rounded.Wifi
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,11 +86,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.SingletonImageLoader
 import coil3.compose.AsyncImage
 import com.music.bitchord.data.model.Account
+import com.music.bitchord.data.scrobbling.LastFM
 import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.settings.AudioQuality
 import com.music.bitchord.data.settings.ThemeMode
 import com.music.bitchord.playback.AudioCache
 import com.music.bitchord.playback.DolbyAtmos
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /**
@@ -101,6 +109,7 @@ fun SettingsScreen(
     account: Account?,
     onSignIn: () -> Unit,
     onSignOut: () -> Unit,
+    onAccountScrobbling: () -> Unit,
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
 ) {
@@ -122,7 +131,22 @@ fun SettingsScreen(
     val sessionId by AppSettings.audioSessionId.collectAsStateWithLifecycle()
     val cacheLimitBytes by AppSettings.audioCacheLimitBytes.collectAsStateWithLifecycle()
 
+    // Scrobbling states
+    val lastfmEnabled by AppSettings.lastfmEnabled.collectAsStateWithLifecycle()
+    val lastfmUsername by AppSettings.lastfmUsername.collectAsStateWithLifecycle()
+    val lastfmSessionKey by AppSettings.lastfmSessionKey.collectAsStateWithLifecycle()
+    val lastfmScrobbleEnabled by AppSettings.lastfmScrobbleEnabled.collectAsStateWithLifecycle()
+    val lastfmNowPlayingEnabled by AppSettings.lastfmNowPlaying.collectAsStateWithLifecycle()
+    val scrobbleMinDuration by AppSettings.scrobbleMinDuration.collectAsStateWithLifecycle()
+    val scrobbleDelayPercent by AppSettings.scrobbleDelayPercent.collectAsStateWithLifecycle()
+    val scrobbleDelaySeconds by AppSettings.scrobbleDelaySeconds.collectAsStateWithLifecycle()
+    val listenBrainzEnabled by AppSettings.listenBrainzEnabled.collectAsStateWithLifecycle()
+    val listenBrainzToken by AppSettings.listenBrainzToken.collectAsStateWithLifecycle()
+
     var picking by remember { mutableStateOf<QualityTarget?>(null) }
+    var showListenBrainzTokenDialog by remember { mutableStateOf(false) }
+    var showLastfmLoginDialog by remember { mutableStateOf(false) }
+    val scrobbleScope = rememberCoroutineScope()
 
     // Coming back from the system Atmos panel is the one moment the answer is
     // most likely to have changed, and on devices whose Atmos switch isn't
@@ -151,7 +175,13 @@ fun SettingsScreen(
             modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 14.dp),
         )
 
-        AccountCard(signedIn = signedIn, account = account, onSignIn = onSignIn)
+        SettingsGroup {
+            SettingsRow(
+                icon = Icons.Rounded.Person,
+                title = "Account & scrobbling",
+                onClick = onAccountScrobbling,
+            )
+        }
 
         SettingsGroup(
             header = "Audio quality",
@@ -361,12 +391,6 @@ fun SettingsScreen(
             )
         }
 
-        if (signedIn) {
-            SettingsGroup {
-                DestructiveRow(label = "Sign out", onClick = onSignOut)
-            }
-        }
-
         Text(
             text = buildAnnotatedString {
                 append("BitChord $version  ")
@@ -414,6 +438,113 @@ fun SettingsScreen(
                 },
             )
         }
+    }
+
+    if (showListenBrainzTokenDialog) {
+        var tokenInput by remember { mutableStateOf(listenBrainzToken) }
+        AlertDialog(
+            onDismissRequest = { showListenBrainzTokenDialog = false },
+            title = { Text("ListenBrainz Token") },
+            text = {
+                OutlinedTextField(
+                    value = tokenInput,
+                    onValueChange = { tokenInput = it },
+                    label = { Text("API Token") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    AppSettings.setListenBrainzToken(tokenInput.trim())
+                    showListenBrainzTokenDialog = false
+                }) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showListenBrainzTokenDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    if (showLastfmLoginDialog) {
+        var usernameInput by remember { mutableStateOf("") }
+        var passwordInput by remember { mutableStateOf("") }
+        var lastfmError by remember { mutableStateOf<String?>(null) }
+        var lastfmLoading by remember { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { if (!lastfmLoading) showLastfmLoginDialog = false },
+            title = { Text("Last.fm Login") },
+            text = {
+                Column {
+                    if (lastfmError != null) {
+                        Text(
+                            text = lastfmError!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                    }
+                    OutlinedTextField(
+                        value = usernameInput,
+                        onValueChange = { usernameInput = it },
+                        label = { Text("Username") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = passwordInput,
+                        onValueChange = { passwordInput = it },
+                        label = { Text("Password") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        lastfmLoading = true
+                        lastfmError = null
+                        scrobbleScope.launch {
+                            try {
+                                // Use default keys for now
+                                LastFM.initialize(
+                                    apiKey = LastFM.FALLBACK_COMPAT_API_KEY,
+                                    secret = LastFM.FALLBACK_COMPAT_SECRET,
+                                )
+                                LastFM.getMobileSession(usernameInput.trim(), passwordInput)
+                                    .onSuccess { auth ->
+                                        AppSettings.setLastfmSessionKey(auth.session.key)
+                                        AppSettings.setLastfmUsername(auth.session.name)
+                                        AppSettings.setLastfmEnabled(true)
+                                        showLastfmLoginDialog = false
+                                    }
+                                    .onFailure { e ->
+                                        lastfmError = e.message ?: "Login failed"
+                                    }
+                            } catch (e: Exception) {
+                                lastfmError = e.message ?: "Login failed"
+                            } finally {
+                                lastfmLoading = false
+                            }
+                        }
+                    },
+                    enabled = !lastfmLoading && usernameInput.isNotBlank() && passwordInput.isNotBlank(),
+                ) {
+                    Text(if (lastfmLoading) "Signing in..." else "Sign in")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLastfmLoginDialog = false }, enabled = !lastfmLoading) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
 
@@ -470,7 +601,7 @@ private fun formatCacheSize(mb: Int): String {
 
 /** Who you're signed in as, straight from YouTube Music's account menu. */
 @Composable
-private fun AccountCard(
+internal fun AccountCard(
     signedIn: Boolean,
     account: Account?,
     onSignIn: () -> Unit,
@@ -609,21 +740,21 @@ private fun QualitySheet(
 
 // ---- Building blocks --------------------------------------------------------
 
-private val GroupShape = RoundedCornerShape(14.dp)
-private val GROUP_INSET = 16.dp
-private val ROW_INSET = 16.dp
-private val ICON_SIZE = 22.dp
-private val ICON_GAP = 14.dp
+internal val GroupShape = RoundedCornerShape(14.dp)
+internal val GROUP_INSET = 16.dp
+internal val ROW_INSET = 16.dp
+internal val ICON_SIZE = 22.dp
+internal val ICON_GAP = 14.dp
 
 /** Where a row's text starts — dividers are inset to match, as on iOS. */
-private val TEXT_INSET = ROW_INSET + ICON_SIZE + ICON_GAP
+internal val TEXT_INSET = ROW_INSET + ICON_SIZE + ICON_GAP
 
 /**
  * One inset card of rows, with an uppercase header above and an optional
  * plain-language [footer] below. Rows are separated by [RowDivider].
  */
 @Composable
-private fun SettingsGroup(
+internal fun SettingsGroup(
     header: String? = null,
     footer: String? = null,
     content: @Composable () -> Unit,
@@ -667,7 +798,7 @@ private fun SettingsGroup(
 }
 
 @Composable
-private fun RowDivider() {
+internal fun RowDivider() {
     HorizontalDivider(
         modifier = Modifier.padding(start = TEXT_INSET),
         thickness = 0.5.dp,
@@ -680,7 +811,7 @@ private fun RowDivider() {
  * [trailing] (a switch, say) or the current [value] followed by a chevron.
  */
 @Composable
-private fun SettingsRow(
+internal fun SettingsRow(
     icon: ImageVector,
     title: String,
     subtitle: String? = null,
@@ -749,7 +880,7 @@ private fun SettingsRow(
 
 /** Marks the connection whose ceiling is actually in force right now. */
 @Composable
-private fun Badge(text: String) {
+internal fun Badge(text: String) {
     Text(
         text = text.uppercase(),
         style = MaterialTheme.typography.labelSmall,
@@ -762,7 +893,7 @@ private fun Badge(text: String) {
 }
 
 @Composable
-private fun Chevron() {
+internal fun Chevron() {
     Icon(
         Icons.Rounded.ChevronRight,
         contentDescription = null,
@@ -774,7 +905,7 @@ private fun Chevron() {
 /** A continuous setting: label and current value on one line, track beneath. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SliderRow(
+internal fun SliderRow(
     icon: ImageVector,
     title: String,
     value: String,
@@ -842,7 +973,7 @@ private fun SliderRow(
 
 /** Sign out: centered, accent-coloured, no glyph — the shape of a real one. */
 @Composable
-private fun DestructiveRow(label: String, onClick: () -> Unit) {
+internal fun DestructiveRow(label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
