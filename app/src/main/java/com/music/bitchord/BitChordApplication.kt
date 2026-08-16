@@ -15,6 +15,7 @@ import com.music.bitchord.playback.AudioCache
 import com.music.bitchord.playback.DolbyAtmos
 import com.music.bitchord.playback.LastPlayed
 import com.music.bitchord.data.innertube.Innertube
+import com.music.bitchord.data.scrobbling.LastFM
 import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.settings.SearchHistory
 
@@ -36,6 +37,8 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
         // One cache directory can only be opened once per process, and
         // PlaybackService shares this one — so it's opened here, not there.
         AudioCache.init(this)
+        // Initialize LastFM with saved settings if available
+        initLastfm()
     }
 
     /**
@@ -64,6 +67,20 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
             // it scrolls; a short fade reads as them developing.
             .crossfade(200)
             .build()
+
+    private fun initLastfm() {
+        val sessionKey = AppSettings.lastfmSessionKey.value
+        if (sessionKey.isBlank()) return
+        val endpoint = AppSettings.lastfmEndpoint.value.ifBlank { LastFM.DEFAULT_API_ENDPOINT }
+        val apiKey = AppSettings.lastfmApiKey.value.ifBlank { LastFM.FALLBACK_COMPAT_API_KEY }
+        val secret = AppSettings.lastfmSecret.value.ifBlank { LastFM.FALLBACK_COMPAT_SECRET }
+        LastFM.configure(
+            endpoint = endpoint,
+            apiKey = apiKey,
+            secret = secret,
+            sessionKey = sessionKey,
+        )
+    }
 
     companion object {
         lateinit var authStore: AuthStore
