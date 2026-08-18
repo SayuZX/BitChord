@@ -110,11 +110,13 @@ import androidx.media3.common.Player
 import coil3.compose.AsyncImage
 import coil3.compose.AsyncImagePainter
 import coil3.request.ImageRequest
+import com.music.bitchord.ui.components.thumbnailBorder
 import com.music.bitchord.ui.icons.BitChordIcons
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.music.bitchord.data.NerdStats
 import com.music.bitchord.data.lyrics.LyricLine
 import com.music.bitchord.data.settings.AppSettings
+import com.music.bitchord.data.model.LikeStatus
 import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.model.artworkAt
 import com.music.bitchord.playback.BACK_RESTARTS_AFTER_MS
@@ -281,6 +283,9 @@ fun NowPlayingScreen(
     repeatMode: Int,
     shuffleEnabled: Boolean,
     autoplayEnabled: Boolean,
+    signedIn: Boolean,
+    likeStatus: LikeStatus,
+    onToggleLike: () -> Unit,
     onPlayPause: () -> Unit,
     onNext: () -> Unit,
     onPrevious: () -> Unit,
@@ -620,6 +625,20 @@ fun NowPlayingScreen(
                         )
                     }
                     Spacer(Modifier.width(10.dp))
+                    // Beside the credits rather than down in the toggle row:
+                    // liking is about *this song*, and the row below is about
+                    // how the queue plays. Guests get nothing to tap, since
+                    // there's no account to record it against.
+                    if (signedIn) {
+                        val liked = likeStatus == LikeStatus.LIKE
+                        CircleGlyph(
+                            icon = if (liked) BitChordIcons.HeartFilled else BitChordIcons.Heart,
+                            contentDescription = if (liked) "Remove from Liked Music" else "Like",
+                            onClick = onToggleLike,
+                            active = liked,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
                     CircleGlyph(
                         icon = Icons.Rounded.MoreHoriz,
                         contentDescription = "More",
@@ -1207,18 +1226,30 @@ private fun LyricsLoadingLine(trackKey: Any, modifier: Modifier = Modifier) {
     )
 }
 
-/** Translucent circular button used for the track menu. */
+/**
+ * Translucent circular button used for the track menu and the like control.
+ *
+ * [active] brightens the disc rather than only the glyph: this sits on album
+ * artwork of any colour, and a white icon on a white-ish sleeve has no tint
+ * change left to make. The filled heart carries the state as a shape too —
+ * see [BitChordIcons.HeartFilled].
+ */
 @Composable
 private fun CircleGlyph(
     icon: ImageVector,
     contentDescription: String,
     onClick: () -> Unit,
+    active: Boolean = false,
 ) {
+    val discAlpha by animateFloatAsState(
+        targetValue = if (active) 0.34f else 0.18f,
+        label = "glyphDisc",
+    )
     Box(
         modifier = Modifier
             .size(34.dp)
             .clip(CircleShape)
-            .background(Color.White.copy(alpha = 0.18f))
+            .background(Color.White.copy(alpha = discAlpha))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -1438,9 +1469,15 @@ private fun InlineQueue(
     // indices, which is what [onMove] and the rest of the callbacks take.
     val headingShown = autoplayEnabled || autoplayStart < queue.size
     val headingCount = if (headingShown) 1 else 0
+    // Nothing moves at or above the track playing right now: what's already
+    // been played is history, and the current row is the boundary the sections
+    // are drawn from. Only what's still to come is the user's to reorder.
+    // AutoPlay's section needs no such limit — [autoplaySectionStart] always
+    // puts it after the current track.
+    val firstMovable = (currentIndex + 1).coerceIn(0, autoplayStart)
     val manualDrag = rememberQueueDragState(
         listState = listState,
-        lazyRange = 0 until autoplayStart,
+        lazyRange = firstMovable until autoplayStart,
         lazyOffset = 0,
         onMove = onMove,
     )
@@ -1497,10 +1534,10 @@ private fun InlineQueue(
                     isCurrent = index == currentIndex,
                     onClick = { onJumpTo(index) },
                     onRemove = { onRemove(index) },
-                    // Everything but the track playing right now. Moving that
-                    // one shifts the very boundary the sections are drawn from,
-                    // which would resize this section mid-gesture.
-                    draggable = index != currentIndex,
+                    // Only what's still queued ahead. The playing track and
+                    // everything already played sit above the line a drag
+                    // can't cross.
+                    draggable = index >= firstMovable,
                     dragging = dragging,
                     onDragStart = { manualDrag.onDragStart(key) },
                     onDrag = manualDrag::onDrag,
@@ -1728,6 +1765,7 @@ private fun InlineQueueRow(
             modifier = Modifier
                 .size(44.dp)
                 .clip(RoundedCornerShape(6.dp))
+                .thumbnailBorder(RoundedCornerShape(6.dp))
                 .background(Color.White.copy(alpha = 0.08f)),
         )
         Spacer(Modifier.width(12.dp))

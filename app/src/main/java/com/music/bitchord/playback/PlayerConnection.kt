@@ -177,9 +177,15 @@ fun MediaController.dropAutoplayTracks() {
  * resolved to (or the video's own audio, as the deliberate fallback when no
  * match was found).
  */
-fun Song.toMediaItem(): MediaItem = MediaItem.Builder()
-    .setMediaId(videoId)
-    .setUri("bitchord://watch?v=$videoId")
+fun Song.toMediaItem(): MediaItem {
+    val uriString = localUri ?: if (videoId.startsWith("content://") || videoId.startsWith("file://")) {
+        videoId
+    } else {
+        "bitchord://watch?v=$videoId"
+    }
+    return MediaItem.Builder()
+        .setMediaId(videoId)
+        .setUri(uriString)
     .setMediaMetadata(
         MediaMetadata.Builder()
             .setTitle(title)
@@ -199,6 +205,7 @@ fun Song.toMediaItem(): MediaItem = MediaItem.Builder()
             .build(),
     )
     .build()
+}
 
 fun MediaController.playSongs(songs: List<Song>, startIndex: Int) {
     if (songs.isEmpty()) return

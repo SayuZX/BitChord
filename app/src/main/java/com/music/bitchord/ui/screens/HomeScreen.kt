@@ -1,7 +1,9 @@
 package com.music.bitchord.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -20,6 +23,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshState
@@ -33,9 +37,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.LibraryMusic
+import com.music.bitchord.ui.icons.BitChordIcons
 import coil3.compose.AsyncImage
 import com.music.bitchord.data.model.CARD_ART_PX
 import com.music.bitchord.data.model.HEADER_ART_PX
@@ -50,6 +59,7 @@ import com.music.bitchord.ui.components.SHELF_CARD_WIDTH
 import com.music.bitchord.ui.components.SignInBanner
 import com.music.bitchord.ui.components.feedMoreSkeleton
 import com.music.bitchord.ui.components.feedSkeleton
+import com.music.bitchord.ui.components.thumbnailBorder
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -194,6 +204,7 @@ private fun HeroCard(item: ShelfItem, onClick: () -> Unit, modifier: Modifier = 
         modifier = modifier
             .aspectRatio(0.92f)
             .clip(RoundedCornerShape(18.dp))
+            .thumbnailBorder(RoundedCornerShape(18.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .clickable(onClick = onClick),
     ) {
@@ -234,38 +245,150 @@ private fun HeroCard(item: ShelfItem, onClick: () -> Unit, modifier: Modifier = 
     }
 }
 
+/**
+ * [leadingCard] rides at the head of the row, ahead of the content — the
+ * Library tab's "New playlist" tile, which belongs among the playlists rather
+ * than in a bar somewhere above them. [onItemLongPress] is likewise the
+ * Library's: a card is only worth holding where there is something to do to
+ * the thing behind it.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-internal fun Shelf(shelf: HomeShelf, onItemClick: (ShelfItem) -> Unit) {
+internal fun Shelf(
+    shelf: HomeShelf,
+    onItemClick: (ShelfItem) -> Unit,
+    onItemLongPress: ((ShelfItem) -> Unit)? = null,
+    leadingCard: (@Composable () -> Unit)? = null,
+) {
     Column(Modifier.padding(bottom = 26.dp)) {
         SectionHeader(shelf.title, shelf.subtitle)
         LazyRow(
             contentPadding = PaddingValues(horizontal = PAGE_GUTTER),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            leadingCard?.let { card -> item(key = "leading") { card() } }
             items(shelf.items) { item ->
-                ShelfCard(item = item, onClick = { onItemClick(item) })
+                ShelfCard(
+                    item = item,
+                    onClick = { onItemClick(item) },
+                    onLongPress = onItemLongPress?.let { { it(item) } },
+                )
             }
         }
     }
 }
 
+/**
+ * A card that isn't a thing yet — the dashed "New playlist" tile at the head
+ * of the Library's playlist row, sized to sit in line with the covers beside
+ * it rather than as a button bolted above them.
+ */
 @Composable
-private fun ShelfCard(item: ShelfItem, onClick: () -> Unit) {
+internal fun NewShelfCard(
+    icon: ImageVector,
+    label: String,
+    subtitle: String,
+    onClick: () -> Unit,
+) {
     Column(
         modifier = Modifier
             .width(SHELF_CARD_WIDTH)
             .clickable(onClick = onClick),
     ) {
-        AsyncImage(
-            model = item.thumbnailUrl.artworkAt(CARD_ART_PX),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
+        Box(
             modifier = Modifier
                 .width(SHELF_CARD_WIDTH)
                 .aspectRatio(1f)
                 .clip(RoundedCornerShape(12.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(34.dp),
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
+        Text(
+            text = subtitle,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ShelfCard(
+    item: ShelfItem,
+    onClick: () -> Unit,
+    onLongPress: (() -> Unit)? = null,
+) {
+    Column(
+        modifier = Modifier
+            .width(SHELF_CARD_WIDTH)
+            .combinedClickable(onClick = onClick, onLongClick = onLongPress),
+    ) {
+        when (item.browseId) {
+            "local:downloads" -> {
+                Box(
+                    modifier = Modifier
+                        .width(SHELF_CARD_WIDTH)
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = BitChordIcons.Download,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(40.dp),
+                    )
+                }
+            }
+            "local:all" -> {
+                Box(
+                    modifier = Modifier
+                        .width(SHELF_CARD_WIDTH)
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.secondaryContainer),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.LibraryMusic,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.size(40.dp),
+                    )
+                }
+            }
+            else -> {
+                AsyncImage(
+                    model = item.thumbnailUrl.artworkAt(CARD_ART_PX),
+                    contentDescription = null,
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    modifier = Modifier
+                        .width(SHELF_CARD_WIDTH)
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .thumbnailBorder(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                )
+            }
+        }
         Spacer(Modifier.height(10.dp))
         Text(
             text = item.title,

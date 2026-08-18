@@ -8,10 +8,14 @@ import com.music.bitchord.data.model.ArtistPage
 import com.music.bitchord.data.model.HomeFeed
 import com.music.bitchord.data.model.HomeShelf
 import com.music.bitchord.data.model.LibraryPage
+import com.music.bitchord.data.model.LikeStatus
+import com.music.bitchord.data.model.PlaylistPrivacy
 import com.music.bitchord.data.model.SearchFilter
 import com.music.bitchord.data.model.SearchResult
 import com.music.bitchord.data.model.ShelfItem
 import com.music.bitchord.data.model.Song
+import com.music.bitchord.data.model.SongMenu
+import com.music.bitchord.data.model.UserPlaylist
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -287,19 +291,84 @@ object YtMusicRepository {
 
     const val MAX_PAGES = 10
 
-    /** Liked Music: the `LM` auto-playlist, addressed as a playlist browse id. */
-    private const val LIKED_MUSIC = "VLLM"
+    /**
+     * Liked Music: the `LM` auto-playlist, addressed as a playlist browse id.
+     * Public because it is also the page a track has to disappear from the
+     * moment it stops being liked — see MainViewModel's `dropFromLikedLists`.
+     */
+    const val LIKED_MUSIC = "VLLM"
 
     /** Songs explicitly added to the library — distinct from Liked Music. */
     private const val LIBRARY_SONGS = "FEmusic_liked_videos"
 
+    /** Saved and own playlists; also what the "add to playlist" picker lists. */
+    private const val LIBRARY_PLAYLISTS = "FEmusic_liked_playlists"
+
     private val LIBRARY_FEEDS = listOf(
-        "Playlists" to "FEmusic_liked_playlists",
+        "Playlists" to LIBRARY_PLAYLISTS,
         "Albums" to "FEmusic_liked_albums",
         "Artists" to "FEmusic_library_corpus_track_artists",
         "Subscriptions" to "FEmusic_library_corpus_artists",
         "Podcasts" to "FEmusic_library_non_music_audio_list",
     )
+
+    // ---- Writes -------------------------------------------------------------
+
+    /**
+     * The account's own state for one track — rating and library membership.
+     *
+     * Deliberately a lookup rather than something cached with the [Song]: a
+     * track reaching the player through the queue has been round-tripped
+     * through a MediaItem, which carries an id and little else, and the
+     * feedback tokens are per-row anyway. Fetched when a menu is opened, which
+     * is the only moment the answer is looked at.
+     */
+    suspend fun songMenu(videoId: String): Result<SongMenu> = call("menu:$videoId") {
+        InnertubeParser.parseSongMenu(Innertube.next(videoId), videoId)
+            ?: error("no menu for $videoId")
+    }
+
+    suspend fun rate(videoId: String, status: LikeStatus): Result<Unit> =
+        call("rate:$videoId") { Innertube.rate(videoId, status) }
+
+    /** Adds or removes a track from the library; [token] says which. */
+    suspend fun setLibraryStatus(token: String): Result<Unit> =
+        call("library:feedback") { Innertube.sendFeedback(token) }
+
+    /**
+     * The playlists a track can be added to. Not paged: an account with more
+     * than one page of playlists is rare, and the picker is a list to scroll
+     * rather than a feed to follow.
+     */
+    suspend fun userPlaylists(): Result<List<UserPlaylist>> = call("playlists") {
+        InnertubeParser.parseUserPlaylists(Innertube.browse(LIBRARY_PLAYLISTS))
+    }
+
+    /** Creates a playlist, optionally seeded with [videoIds]; returns its id. */
+    suspend fun createPlaylist(
+        title: String,
+        privacy: PlaylistPrivacy,
+        videoIds: List<String> = emptyList(),
+    ): Result<String> = call("playlist:create") {
+        Innertube.createPlaylist(title, privacy, videoIds = videoIds)
+    }
+
+    suspend fun addToPlaylist(playlistId: String, videoIds: List<String>): Result<Unit> =
+        call("playlist:add") { Innertube.addToPlaylist(playlistId, videoIds) }
+
+    /** [entries] are (setVideoId, videoId) pairs — see [Song.setVideoId]. */
+    suspend fun removeFromPlaylist(
+        playlistId: String,
+        entries: List<Pair<String, String>>,
+    ): Result<Unit> = call("playlist:remove") {
+        Innertube.removeFromPlaylist(playlistId, entries)
+    }
+
+    suspend fun renamePlaylist(playlistId: String, title: String): Result<Unit> =
+        call("playlist:rename") { Innertube.renamePlaylist(playlistId, title) }
+
+    suspend fun deletePlaylist(playlistId: String): Result<Unit> =
+        call("playlist:delete") { Innertube.deletePlaylist(playlistId) }
 
     /**
      * Artist page. The landing page only lists ~5 songs, so the linked

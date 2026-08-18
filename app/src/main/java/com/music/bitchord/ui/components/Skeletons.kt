@@ -217,13 +217,15 @@ private fun DetailActionsSkeleton() {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = PAGE_GUTTER, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+            // Matches the real pair's inset, height and corner, so the header
+            // above them doesn't shift when the track list lands.
+            .padding(horizontal = PAGE_GUTTER + 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         repeat(2) {
             ShimmerBox(
-                modifier = Modifier.weight(1f).height(40.dp),
-                shape = RoundedCornerShape(percent = 50),
+                modifier = Modifier.weight(1f).height(48.dp),
+                shape = RoundedCornerShape(12.dp),
             )
         }
     }
@@ -260,7 +262,7 @@ fun LazyListScope.detailSkeleton(isArtist: Boolean) {
     item(key = "skeleton:detail:actions") {
         Column {
             DetailActionsSkeleton()
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(20.dp))
         }
     }
     songListSkeleton(count = 8, keyPrefix = "skeleton:detail:song")

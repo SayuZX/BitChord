@@ -14,6 +14,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DecoderReuseEvaluation
@@ -109,6 +110,10 @@ class PlaybackService : MediaSessionService() {
         ) { dataSpec ->
             val videoId = dataSpec.uri.getQueryParameter("v")
                 ?: return@Factory dataSpec
+            val downloadedUri = runBlocking { com.music.bitchord.download.Downloads.savedUri(this@PlaybackService, videoId) }
+            if (downloadedUri != null) {
+                return@Factory dataSpec.buildUpon().setUri(downloadedUri).build()
+            }
             val streamUrl = runBlocking { StreamResolver.resolve(videoId) }
             dataSpec.buildUpon()
                 .setUri(Uri.parse(streamUrl))
@@ -121,8 +126,9 @@ class PlaybackService : MediaSessionService() {
                 .build()
         }
         // Read-ahead resolves streams through the same chain the player does.
-        AudioCache.setUpstream(resolvingFactory)
-        mediaSourceFactory = DefaultMediaSourceFactory(AudioCache.playbackFactory(resolvingFactory))
+        val defaultDataSourceFactory = DefaultDataSource.Factory(this, resolvingFactory)
+        AudioCache.setUpstream(defaultDataSourceFactory)
+        mediaSourceFactory = DefaultMediaSourceFactory(AudioCache.playbackFactory(defaultDataSourceFactory))
 
         val exoPlayer = ExoPlayer.Builder(this)
             .setRenderersFactory(silenceSkippingRenderers(spatialAudioProcessor))

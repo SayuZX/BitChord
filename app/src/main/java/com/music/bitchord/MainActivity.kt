@@ -1,13 +1,19 @@
 package com.music.bitchord
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -25,6 +31,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -56,15 +63,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.music.bitchord.auth.YtMusicLoginScreen
+import com.music.bitchord.data.LocalMediaRepository
 import com.music.bitchord.data.model.BrowseType
+import com.music.bitchord.data.model.LikeStatus
 import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.model.UiState
+import com.music.bitchord.data.model.UserPlaylist
 import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.settings.ThemeMode
 import com.music.bitchord.ui.screens.SettingsScreen
@@ -74,6 +86,10 @@ import com.music.bitchord.playback.autoplaySectionStart
 import com.music.bitchord.playback.dropAutoplayTracks
 import com.music.bitchord.playback.playSongs
 import com.music.bitchord.playback.toMediaItem
+import com.music.bitchord.download.DownloadStore
+import com.music.bitchord.download.Downloads
+import com.music.bitchord.ui.components.PlaylistActionsSheet
+import com.music.bitchord.ui.components.PlaylistPickerSheet
 import com.music.bitchord.ui.components.SongActionsSheet
 import com.music.bitchord.playback.rememberMediaController
 import com.music.bitchord.playback.rememberPlayerState
@@ -129,7 +145,18 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     var showLogin by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var songActions by remember { mutableStateOf<Song?>(null) }
+    // Which track the playlist picker is adding, or null when it's closed.
+    // Separate from [songActions] so the menu can close behind it — the picker
+    // is the next step, not a second sheet stacked on the first.
+    var playlistTarget by remember { mutableStateOf<Song?>(null) }
+    // The picker opened from the Library tab, where there is no track and
+    // creating the playlist is the whole errand.
+    var creatingPlaylist by remember { mutableStateOf(false) }
+    var playlistActions by remember { mutableStateOf<UserPlaylist?>(null) }
     val autoplay by AppSettings.autoplay.collectAsStateWithLifecycle()
+    // Incremented each time the search tab is re-tapped while already selected,
+    // which SearchScreen uses as a signal to focus the input field.
+    var searchFocusTrigger by remember { mutableIntStateOf(0) }
 
     // The player fills the screen with dark artwork whichever theme is on, so
     // it keeps light glyphs; every other surface follows the theme.
@@ -177,6 +204,16 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     val searchHistory by viewModel.searchHistory.collectAsStateWithLifecycle()
     val detailStack by viewModel.detailStack.collectAsStateWithLifecycle()
     val detail = detailStack.lastOrNull()
+    val likeStatuses by viewModel.likeStatuses.collectAsStateWithLifecycle()
+    val playlists by viewModel.playlists.collectAsStateWithLifecycle()
+    val playlistsLoading by viewModel.playlistsLoading.collectAsStateWithLifecycle()
+    val songMenu by viewModel.songMenu.collectAsStateWithLifecycle()
+
+    // Every account write reports itself the same way, from one place, rather
+    // than each call site remembering to raise its own toast.
+    LaunchedEffect(Unit) {
+        viewModel.messages.collect { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+    }
     // Settings has no tab of its own — it sits on top of whatever tab was
     // selected. A pushed album/artist page (from the player, search, etc.)
     // should surface above it rather than being hidden behind it.
@@ -250,6 +287,9 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     // something is exactly when it needs re-fetching.
     LaunchedEffect(currentFeed) {
         if (currentFeed == MainViewModel.Feed.HOME) viewModel.onHomeShown()
+        // Likewise for Library: a playlist created or a song liked since it
+        // was last fetched is a change to exactly this page.
+        if (currentFeed == MainViewModel.Feed.LIBRARY) viewModel.onLibraryShown()
     }
 
     val currentPull = when (currentFeed) {
@@ -262,6 +302,21 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
         derivedStateOf {
             currentListState.firstVisibleItemIndex > 0 ||
                 currentListState.firstVisibleItemScrollOffset > 24
+        }
+    }
+
+    // A pushed album/artist/playlist page has a large header of its own — the
+    // sleeve, or an artist's photo running edge to edge — which owns the title
+    // until it is scrolled away, exactly as a tab's big heading does. The state
+    // is hoisted because the bar lives beside that page rather than inside it,
+    // and is rebuilt per page: pushing a second one must not inherit the
+    // first's scroll offset.
+    val detailListState = remember(detail?.browseId) { LazyListState() }
+    val detailTitleDrop = with(LocalDensity.current) { DETAIL_TITLE_DROP.toPx() }
+    val detailScrolled by remember(detailListState, detailTitleDrop) {
+        derivedStateOf {
+            detailListState.firstVisibleItemIndex > 0 ||
+                detailListState.firstVisibleItemScrollOffset > detailTitleDrop
         }
     }
 
@@ -370,6 +425,67 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
         }
     }
 
+    // ---- Downloads ----
+    // Two permissions, and never both on one device: writing to the shared
+    // Downloads folder needs storage access below API 29 and none at all from
+    // 29 on, where MediaStore grants an app its own rows; notifications are
+    // only asked for from API 33. So the branches below are mutually exclusive
+    // by SDK level, and nothing here can stack two dialogs on each other.
+    var downloadPending by remember { mutableStateOf<Song?>(null) }
+    val notifyPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* Refusing costs the progress notification, not the download. */ }
+    val storagePermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val song = downloadPending
+        downloadPending = null
+        when {
+            song == null -> Unit
+            granted -> Downloads.enqueue(context, song)
+            // The one case where refusing is fatal: below API 29 there is no
+            // other way to reach the Downloads folder.
+            else -> Toast
+                .makeText(context, "Storage access is needed to save songs", Toast.LENGTH_SHORT)
+                .show()
+        }
+    }
+    val mediaPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            viewModel.reloadLocalDetail("local:all")
+        } else {
+            Toast.makeText(context, "Storage permission is required to read local audio files", Toast.LENGTH_SHORT).show()
+        }
+    }
+    val startDownload: (Song) -> Unit = { song ->
+        val needsStorage = DownloadStore.needsLegacyPermission() &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE,
+            ) != PackageManager.PERMISSION_GRANTED
+
+        // Asked for here rather than at launch because here is where it means
+        // something: a download is the first thing this app does that the user
+        // is expected to walk away from.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notifyPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        if (needsStorage) {
+            downloadPending = song
+            storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else {
+            Downloads.enqueue(context, song)
+        }
+    }
+
     // Content padding leaves room for the frosted bar above and the tab bar
     // (plus mini player) below, so nothing is ever trapped under the glass.
     val listPadding = PaddingValues(
@@ -422,6 +538,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
             } else if (page != null) {
                 DetailScreen(
                     page = page,
+                    listState = detailListState,
                     onSongClick = play,
                     onSongLongPress = { songActions = it },
                     onSongSwipe = addToQueue,
@@ -512,6 +629,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                     onFilterChange = viewModel::onFilterChange,
                     results = results,
                     listState = searchListState,
+                    focusTrigger = searchFocusTrigger,
                     // Search hits are alternatives to each other, not a running
                     // order — play the one tapped and build a station from it.
                     onSongClick = { songs, index ->
@@ -545,11 +663,16 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                     signedIn = signedIn,
                     state = libraryState,
                     listState = libraryListState,
-                    onSongClick = play,
-                    onSongLongPress = { songActions = it },
-                    onSongSwipe = addToQueue,
                     onShelfItemClick = { item ->
                         item.browseId?.let { id ->
+                            if (id == "local:all" && !LocalMediaRepository.hasStoragePermission(context)) {
+                                val perm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    Manifest.permission.READ_MEDIA_AUDIO
+                                } else {
+                                    Manifest.permission.READ_EXTERNAL_STORAGE
+                                }
+                                mediaPermissionLauncher.launch(perm)
+                            }
                             viewModel.openDetail(
                                 browseId = id,
                                 title = item.title,
@@ -558,6 +681,12 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                             )
                         }
                     },
+                    // Only the account's own playlists have a menu behind
+                    // them; holding a saved album or an artist does nothing.
+                    onShelfItemLongPress = { item ->
+                        playlistActions = viewModel.editablePlaylist(item.browseId)
+                    },
+                    onNewPlaylist = { creatingPlaylist = true },
                     onSignIn = { showLogin = true },
                     onRetry = viewModel::loadLibrary,
                     refreshing = MainViewModel.Feed.LIBRARY in refreshing,
@@ -579,8 +708,11 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
             hazeState = hazeState,
             // Search has no large in-list header to hand the title back to —
             // the field takes that space — so its bar title is always up.
-            scrolled = scrolled || detail != null || showSettings ||
-                selectedTab == TAB_SEARCH,
+            scrolled = when {
+                showSettings -> true
+                detail != null -> detailScrolled
+                else -> scrolled || selectedTab == TAB_SEARCH
+            },
             refreshing = currentFeed != null && currentFeed in refreshing,
             pullFraction = { currentPull?.distanceFraction ?: 0f },
             onBack = when {
@@ -647,12 +779,19 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
             FloatingBottomBar(
                 tabs = tabs,
                 selectedIndex = selectedTab,
-                onTabSelected = {
-                    // Leave any pushed album/artist page, or Settings, when
-                    // switching tabs.
+                onTabSelected = { index ->
+                    // Re-tapping the search tab while already on it focuses the
+                    // input field and opens the keyboard rather than resetting.
+                    if (index == TAB_SEARCH && selectedTab == TAB_SEARCH) {
+                        searchFocusTrigger++
+                        return@FloatingBottomBar
+                    }
+                    if (index != TAB_SEARCH) {
+                        searchFocusTrigger = 0
+                    }
                     viewModel.clearDetail()
                     showSettings = false
-                    selectedTab = it
+                    selectedTab = index
                 },
             )
         }
@@ -711,6 +850,9 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                     repeatMode = player.repeatMode,
                     shuffleEnabled = shuffleEnabled,
                     autoplayEnabled = autoplay,
+                    signedIn = signedIn,
+                    likeStatus = likeStatuses[song.videoId] ?: LikeStatus.INDIFFERENT,
+                    onToggleLike = { viewModel.toggleLike(song.videoId) },
                     onToggleShuffle = { controller?.let(QueueShuffle::toggle) },
                     onCycleRepeat = {
                         controller?.let {
@@ -800,14 +942,49 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                 val art = song.thumbnailUrl.takeUnless { type == BrowseType.ARTIST }
                 viewModel.openDetail(id, title, sub, art, type)
             }
+            // The library toggle needs tokens only YouTube can mint, and the
+            // rating it comes back with is more authoritative than anything
+            // the library feed knew — so the menu asks as it opens.
+            LaunchedEffect(song.videoId) { viewModel.loadSongMenu(song.videoId) }
+            // "Remove from this playlist" is only a sentence on a playlist
+            // page the account can actually edit, and only for a row that
+            // carries the per-entry id a removal is expressed in.
+            val editable = viewModel.editablePlaylist(detail?.browseId)
+                ?.takeIf { !fromPlayer && song.setVideoId != null }
             ModalBottomSheet(
                 onDismissRequest = { songActions = null },
-                containerColor = MaterialTheme.colorScheme.background,
+                // The sheet paints itself in the track's own colours, corners
+                // and drag handle included — see SongActionsSheet.
+                containerColor = Color.Transparent,
+                dragHandle = null,
             ) {
                 SongActionsSheet(
                     song = song,
+                    signedIn = signedIn,
+                    likeStatus = likeStatuses[song.videoId] ?: LikeStatus.INDIFFERENT,
+                    libraryState = songMenu,
                     onPlayNext = { playNext(song); songActions = null },
                     onAddToQueue = { addToQueue(song); songActions = null },
+                    // Stays open: the row it replaces itself with is the
+                    // progress, and closing the sheet would hide the only
+                    // answer to "did that work?".
+                    onDownload = { startDownload(song) },
+                    // The sheet stays up for a rating: it shows the new state
+                    // in place, and people often thumb a song and then queue it.
+                    onToggleLike = { viewModel.toggleLike(song.videoId) },
+                    onToggleDislike = { viewModel.toggleDislike(song.videoId) },
+                    onAddToPlaylist = {
+                        songActions = null
+                        viewModel.loadPlaylists()
+                        playlistTarget = song
+                    },
+                    onToggleLibrary = { viewModel.toggleLibrary() },
+                    onRemoveFromPlaylist = editable?.let {
+                        {
+                            songActions = null
+                            viewModel.removeFromPlaylist(it.browseId, song)
+                        }
+                    },
                     onOpenAlbum = { id ->
                         openPage(
                             id,
@@ -821,6 +998,67 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                     },
                     showSleepTimer = fromPlayer,
                     onShare = share.takeIf { fromPlayer },
+                )
+            }
+        }
+
+        // ---- Add to playlist / new playlist ----
+        // One sheet for both, because they are one decision: the list of
+        // playlists with a way to make another. `creatingPlaylist` opens it
+        // straight onto the form, which is what the Library tile means.
+        if (playlistTarget != null || creatingPlaylist) {
+            val target = playlistTarget
+            val dismiss = {
+                playlistTarget = null
+                creatingPlaylist = false
+            }
+            ModalBottomSheet(
+                onDismissRequest = dismiss,
+                containerColor = MaterialTheme.colorScheme.background,
+            ) {
+                PlaylistPickerSheet(
+                    playlists = playlists,
+                    loading = playlistsLoading,
+                    song = target,
+                    startCreating = target == null,
+                    onPick = { playlist ->
+                        target?.let { viewModel.addToPlaylist(playlist, it) }
+                        dismiss()
+                    },
+                    onCreate = { title, privacy ->
+                        viewModel.createPlaylist(title, privacy, target)
+                        dismiss()
+                    },
+                )
+            }
+        }
+
+        // ---- Playlist rename / delete (long-press on the Library tab) ----
+        playlistActions?.let { playlist ->
+            ModalBottomSheet(
+                onDismissRequest = { playlistActions = null },
+                containerColor = MaterialTheme.colorScheme.background,
+            ) {
+                PlaylistActionsSheet(
+                    playlist = playlist,
+                    onOpen = {
+                        playlistActions = null
+                        viewModel.openDetail(
+                            browseId = playlist.browseId,
+                            title = playlist.title,
+                            subtitle = playlist.subtitle,
+                            thumbnailUrl = playlist.thumbnailUrl,
+                            type = BrowseType.PLAYLIST,
+                        )
+                    },
+                    onRename = { name ->
+                        playlistActions = null
+                        viewModel.renamePlaylist(playlist, name)
+                    },
+                    onDelete = {
+                        playlistActions = null
+                        viewModel.deletePlaylist(playlist)
+                    },
                 )
             }
         }
@@ -883,6 +1121,16 @@ private fun tween(durationMillis: Int) =
 
 /** How many tracks a station pulls in at a time. */
 private const val RADIO_BATCH = 20
+
+/**
+ * How far a detail page scrolls before its title moves up into the bar.
+ *
+ * Roughly the height of the sleeve and the credit stacked above the Play pair,
+ * so the two titles hand over as the header one leaves rather than sitting on
+ * screen together. The bar cross-fades over 220ms, which absorbs the difference
+ * between that estimate and a particular page's real header.
+ */
+private val DETAIL_TITLE_DROP = 320.dp
 
 private const val TAB_HOME = 0
 private const val TAB_EXPLORE = 1

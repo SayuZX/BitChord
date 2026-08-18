@@ -34,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -41,6 +42,18 @@ import coil3.compose.AsyncImage
 import com.music.bitchord.data.model.ROW_ART_PX
 import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.model.artworkAt
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.composed
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.foundation.border
+
+fun Modifier.thumbnailBorder(shape: Shape): Modifier = composed {
+    this.border(
+        width = 1.dp,
+        color = if (isSystemInDarkTheme()) Color.White.copy(alpha = 0.15f) else Color.Black.copy(alpha = 0.15f),
+        shape = shape
+    )
+}
 
 /**
  * The left and right inset every page's content sits at.
@@ -79,6 +92,27 @@ fun SongRow(
     modifier: Modifier = Modifier,
     onLongPress: (() -> Unit)? = null,
     onSwipeToQueue: (() -> Unit)? = null,
+    /**
+     * What the row paints over the swipe reveal as it slides back.
+     *
+     * It has to be the colour of the page the row is *on*, not the theme's
+     * background — an album page tinted from its sleeve would otherwise drag a
+     * black band across itself on every swipe.
+     */
+    rowBackground: Color = MaterialTheme.colorScheme.background,
+    /**
+     * Drawn in place of the artwork, for lists where every row would otherwise
+     * repeat the same cover — an album's own track listing.
+     */
+    trackNumber: Int? = null,
+    /**
+     * The artist line, and the track number when there is one.
+     *
+     * A page tinted from its artwork wants this brighter than the flat feeds
+     * do: the usual dim grey is pitched against black, and against a mid-toned
+     * wash it stops being legible as a second line and starts disappearing.
+     */
+    subtitleColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
 ) {
     val swipeState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
@@ -91,7 +125,7 @@ fun SongRow(
     )
 
     if (onSwipeToQueue == null) {
-        SongRowContent(song, onClick, onLongPress, modifier)
+        SongRowContent(song, onClick, onLongPress, modifier, trackNumber, subtitleColor)
         return
     }
 
@@ -104,7 +138,9 @@ fun SongRow(
             song = song,
             onClick = onClick,
             onLongPress = onLongPress,
-            modifier = Modifier.background(MaterialTheme.colorScheme.background),
+            modifier = Modifier.background(rowBackground),
+            trackNumber = trackNumber,
+            subtitleColor = subtitleColor,
         )
     }
 }
@@ -149,6 +185,8 @@ private fun SongRowContent(
     onClick: () -> Unit,
     onLongPress: (() -> Unit)?,
     modifier: Modifier = Modifier,
+    trackNumber: Int? = null,
+    subtitleColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
 ) {
     Row(
         modifier = modifier
@@ -157,14 +195,27 @@ private fun SongRowContent(
             .padding(horizontal = PAGE_GUTTER, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        AsyncImage(
-            model = song.artworkAt(ROW_ART_PX),
-            contentDescription = null,
-            modifier = Modifier
-                .size(52.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-        )
+        if (trackNumber != null) {
+            // Same 52dp the artwork would take, so a numbered list and an
+            // illustrated one share a left edge and a divider inset.
+            Box(Modifier.size(52.dp), contentAlignment = Alignment.Center) {
+                Text(
+                    text = "$trackNumber",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = subtitleColor,
+                )
+            }
+        } else {
+            AsyncImage(
+                model = song.artworkAt(ROW_ART_PX),
+                contentDescription = null,
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .thumbnailBorder(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+            )
+        }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(
@@ -178,7 +229,7 @@ private fun SongRowContent(
             Text(
                 text = song.artist,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = subtitleColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -188,7 +239,7 @@ private fun SongRowContent(
             Text(
                 text = it,
                 style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = subtitleColor,
             )
         }
         // Same sheet the long-press opens, for anyone who doesn't think to hold.

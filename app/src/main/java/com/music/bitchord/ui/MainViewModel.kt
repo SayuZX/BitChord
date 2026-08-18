@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.music.bitchord.auth.AuthStore
 import com.music.bitchord.data.AppUpdateChecker
+import com.music.bitchord.data.LocalMediaRepository
 import com.music.bitchord.data.YtMusicRepository
 import com.music.bitchord.data.lyrics.LrcLib
 import com.music.bitchord.data.lyrics.LyricLine
@@ -15,10 +16,14 @@ import com.music.bitchord.data.model.BrowseType
 import com.music.bitchord.data.model.DetailPage
 import com.music.bitchord.data.model.HomeShelf
 import com.music.bitchord.data.model.LibraryPage
+import com.music.bitchord.data.model.LikeStatus
+import com.music.bitchord.data.model.PlaylistPrivacy
 import com.music.bitchord.data.model.SearchFilter
 import com.music.bitchord.data.model.SearchResult
 import com.music.bitchord.data.model.Song
+import com.music.bitchord.data.model.SongMenu
 import com.music.bitchord.data.model.UiState
+import com.music.bitchord.data.model.UserPlaylist
 import com.music.bitchord.data.settings.SearchHistory
 import android.util.LruCache
 import kotlinx.coroutines.FlowPreview
@@ -26,11 +31,16 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
 
@@ -150,6 +160,396 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Set once per launch if GitHub has a release newer than this build. */
     val updateAvailable: StateFlow<AppUpdateChecker.UpdateInfo?> = AppUpdateChecker.available
 
+    // ---- Ratings, library and playlists -------------------------------------
+
+    /**
+     * One-line results of the account writes below — "Added to Chill", "Signed
+     * out". A flow rather than a state so the same message twice in a row is
+     * shown twice, and so nothing is left on screen after it has been read.
+     */
+    private val _messages = MutableSharedFlow<String>(
+        extraBufferCapacity = 4,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val messages: SharedFlow<String> = _messages.asSharedFlow()
+
+    /**
+     * Ratings this session has set, which win over whatever the library feed
+     * last said.
+     *
+     * Kept apart from the library rather than folded into it because the two
+     * answer different questions: Liked Music is what YouTube knew when the
+     * page was fetched, and this is what the user has done since. Layering
+     * them ([likeStatuses]) means a tap shows immediately without the library
+     * having to be re-fetched, and a later refresh can't undo it.
+     */
+    private val _likeOverrides = MutableStateFlow<Map<String, LikeStatus>>(emptyMap())
+
+    /** Every rating known for this account: the library's, then this session's. */
+    val likeStatuses: StateFlow<Map<String, LikeStatus>> =
+        combine(_library, _likeOverrides) { library, overrides ->
+            val liked = (library as? UiState.Success)?.data?.likedSongs
+                ?.associate { it.videoId to LikeStatus.LIKE }
+                .orEmpty()
+            liked + overrides
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    fun likeStatusOf(videoId: String): LikeStatus =
+        likeStatuses.value[videoId] ?: LikeStatus.INDIFFERENT
+
+    /**
+     * Sets (or clears) the thumbs rating on [videoId].
+     *
+     * Written to the screen first and rolled back if YouTube refuses. A rating
+     * is a one-tap, low-stakes action taken while a song is playing; waiting
+     * on a round trip before the heart fills reads as the tap not having
+     * registered, and people tap again.
+     */
+    fun setLike(videoId: String, status: LikeStatus) {
+        if (!requireSignIn()) return
+        val previous = likeStatusOf(videoId)
+        if (previous == status) return
+        _likeOverrides.value += (videoId to status)
+        viewModelScope.launch {
+            YtMusicRepository.rate(videoId, status).fold(
+                onSuccess = {
+                    // Liked Music is now out of date either way.
+                    libraryStale = true
+                    if (status != LikeStatus.LIKE) dropFromLikedLists(videoId)
+                    // Clearing the heart means forgetting the song, not
+                    // demoting it — see [forgetFromLibrary].
+                    val unliked = previous == LikeStatus.LIKE &&
+                        status == LikeStatus.INDIFFERENT
+                    val alsoRemoved = unliked && forgetFromLibrary(videoId)
+                    _messages.tryEmit(
+                        when {
+                            status == LikeStatus.LIKE -> "Added to Liked Music"
+                            status == LikeStatus.DISLIKE -> "Disliked"
+                            alsoRemoved -> "Removed from Liked Music and library"
+                            else -> "Removed from Liked Music"
+                        },
+                    )
+                },
+                onFailure = {
+                    _likeOverrides.value += (videoId to previous)
+                    _messages.tryEmit(it.friendly())
+                },
+            )
+        }
+    }
+
+    /**
+     * Takes an un-liked track out of the library as well, and reports whether
+     * it did.
+     *
+     * Liking and saving are two independent flags on YouTube's side, and
+     * clearing only the first leaves the song saved — still feeding the
+     * Library tab's Artists shelf, still in the library feeds, with nowhere
+     * left in this app to reach it and finish the job. Clearing the heart
+     * reads as "forget this song", so it clears both.
+     *
+     * The token is fetched here rather than taken from [songMenu] because the
+     * heart in the player never opens a menu, so there is often nothing
+     * cached to take. One extra request, on an action nobody performs in bulk.
+     * A song that was never saved has no removal token and this is a no-op.
+     */
+    private suspend fun forgetFromLibrary(videoId: String): Boolean {
+        val menu = YtMusicRepository.songMenu(videoId).getOrNull() ?: return false
+        val token = menu.removeFromLibraryToken?.takeIf { menu.inLibrary } ?: return false
+        if (YtMusicRepository.setLibraryStatus(token).isFailure) return false
+        // The menu may be the one on screen; don't leave it offering a
+        // removal that has already happened.
+        _songMenu.value = _songMenu.value?.copy(inLibrary = false)
+        return true
+    }
+
+    /**
+     * Takes an un-liked track out of the lists that exist *because* it was
+     * liked — the Library tab's Liked Music section, and the Liked Music page
+     * itself if it happens to be open.
+     *
+     * Marking the library stale isn't enough on its own: that only acts when
+     * the tab is next opened, and un-liking is nearly always done from inside
+     * one of these two lists, looking straight at the row. Leaving it there
+     * reads as the tap not having worked — the menu says "Like" again while
+     * the song sits in Liked Music.
+     *
+     * Only ever removes. A track liked from somewhere else doesn't get spliced
+     * into a list that YouTube orders for itself; the next fetch places it.
+     */
+    private fun dropFromLikedLists(videoId: String) {
+        val library = (_library.value as? UiState.Success)?.data
+        if (library != null && library.likedSongs.any { it.videoId == videoId }) {
+            _library.value = UiState.Success(
+                library.copy(likedSongs = library.likedSongs.filterNot { it.videoId == videoId }),
+            )
+        }
+        _detailStack.value = _detailStack.value.map { page ->
+            val songs = (page.songs as? UiState.Success)?.data
+            if (page.browseId != YtMusicRepository.LIKED_MUSIC || songs == null) {
+                page
+            } else {
+                page.copy(songs = UiState.Success(songs.filterNot { it.videoId == videoId }))
+            }
+        }
+    }
+
+    /** The heart: liked becomes neutral, anything else becomes liked. */
+    fun toggleLike(videoId: String) = setLike(
+        videoId,
+        if (likeStatusOf(videoId) == LikeStatus.LIKE) LikeStatus.INDIFFERENT else LikeStatus.LIKE,
+    )
+
+    /** As [toggleLike], for the thumb-down. */
+    fun toggleDislike(videoId: String) = setLike(
+        videoId,
+        if (likeStatusOf(videoId) == LikeStatus.DISLIKE) {
+            LikeStatus.INDIFFERENT
+        } else {
+            LikeStatus.DISLIKE
+        },
+    )
+
+    /**
+     * The open track menu's account state, or null while it is still being
+     * fetched. Only one menu can be open at a time, so one slot is enough.
+     */
+    private val _songMenu = MutableStateFlow<SongMenu?>(null)
+    val songMenu: StateFlow<SongMenu?> = _songMenu.asStateFlow()
+
+    private var songMenuJob: Job? = null
+
+    /**
+     * Loads the account state behind an opening track menu — the library
+     * tokens, and any rating the response happens to state.
+     *
+     * The rating is only ever taken when it *adds* something: a LIKE or a
+     * DISLIKE the library couldn't have told us, such as a disliked track or
+     * one liked past the tenth page of Liked Music. An INDIFFERENT is
+     * discarded.
+     *
+     * That asymmetry is not fussiness. This lookup reads a watch queue, and a
+     * watch queue routinely renders a liked track with no rating on it at all;
+     * believing that silence downgraded songs sitting in Liked Music to
+     * "not liked" a beat after their menu opened — the label changing under
+     * the user, with no request sent and nothing removed.
+     */
+    fun loadSongMenu(videoId: String?) {
+        songMenuJob?.cancel()
+        _songMenu.value = null
+        if (videoId == null || !_signedIn.value) return
+        songMenuJob = viewModelScope.launch {
+            val menu = YtMusicRepository.songMenu(videoId).getOrNull() ?: return@launch
+            _songMenu.value = menu
+            val stated = menu.likeStatus
+            if (stated != null && stated != LikeStatus.INDIFFERENT &&
+                videoId !in _likeOverrides.value
+            ) {
+                _likeOverrides.value += (videoId to stated)
+            }
+        }
+    }
+
+    /**
+     * Adds or removes the open menu's track from the library.
+     *
+     * Takes no video id because it can't use one: the request is the token in
+     * [songMenu], which is why the row it belongs to isn't drawn until that
+     * lookup lands.
+     */
+    fun toggleLibrary() {
+        val menu = _songMenu.value ?: return
+        val token = if (menu.inLibrary) {
+            menu.removeFromLibraryToken
+        } else {
+            menu.addToLibraryToken
+        } ?: return
+        val added = !menu.inLibrary
+        _songMenu.value = menu.copy(inLibrary = added)
+        viewModelScope.launch {
+            YtMusicRepository.setLibraryStatus(token).fold(
+                onSuccess = {
+                    libraryStale = true
+                    _messages.tryEmit(if (added) "Saved to library" else "Removed from library")
+                },
+                onFailure = {
+                    _songMenu.value = _songMenu.value?.copy(inLibrary = !added)
+                    _messages.tryEmit(it.friendly())
+                },
+            )
+        }
+    }
+
+    /** The account's own playlists, for the picker and the library tab. */
+    private val _playlists = MutableStateFlow<List<UserPlaylist>>(emptyList())
+    val playlists: StateFlow<List<UserPlaylist>> = _playlists.asStateFlow()
+
+    private val _playlistsLoading = MutableStateFlow(false)
+    val playlistsLoading: StateFlow<Boolean> = _playlistsLoading.asStateFlow()
+
+    /** Re-fetched rather than cached for the session: playlists are edited here. */
+    fun loadPlaylists() {
+        if (!_signedIn.value || _playlistsLoading.value) return
+        _playlistsLoading.value = true
+        viewModelScope.launch {
+            YtMusicRepository.userPlaylists().onSuccess { _playlists.value = it }
+            _playlistsLoading.value = false
+        }
+    }
+
+    /**
+     * Adds [song] to a playlist.
+     *
+     * Not optimistic, unlike a rating: there is nothing on screen to update
+     * ahead of the answer, and a "Added to X" that turns out to be untrue is
+     * worse than one that arrives a moment late.
+     */
+    fun addToPlaylist(playlist: UserPlaylist, song: Song) {
+        if (!requireSignIn()) return
+        viewModelScope.launch {
+            YtMusicRepository.addToPlaylist(playlist.playlistId, listOf(song.videoId)).fold(
+                onSuccess = {
+                    libraryStale = true
+                    _messages.tryEmit("Added to ${playlist.title}")
+                },
+                onFailure = { _messages.tryEmit(it.friendly()) },
+            )
+        }
+    }
+
+    /**
+     * Creates a playlist, seeded with [song] when the flow started from a
+     * track's menu — one request, so it can't half-succeed into an empty
+     * playlist the user has to add to again.
+     */
+    fun createPlaylist(title: String, privacy: PlaylistPrivacy, song: Song? = null) {
+        if (!requireSignIn()) return
+        val name = title.trim().ifBlank { "New playlist" }
+        viewModelScope.launch {
+            YtMusicRepository.createPlaylist(
+                title = name,
+                privacy = privacy,
+                videoIds = listOfNotNull(song?.videoId),
+            ).fold(
+                onSuccess = {
+                    libraryStale = true
+                    loadPlaylists()
+                    refresh(Feed.LIBRARY)
+                    _messages.tryEmit(
+                        if (song != null) "Added to $name" else "Created $name",
+                    )
+                },
+                onFailure = { _messages.tryEmit(it.friendly()) },
+            )
+        }
+    }
+
+    /**
+     * Drops [song] from the playlist page it is being read on, and takes the
+     * row out from under the reader rather than waiting for a re-fetch.
+     */
+    fun removeFromPlaylist(browseId: String, song: Song) {
+        val setVideoId = song.setVideoId ?: return
+        if (!requireSignIn()) return
+        val playlistId = browseId.removePrefix("VL")
+        viewModelScope.launch {
+            YtMusicRepository.removeFromPlaylist(
+                playlistId,
+                listOf(setVideoId to song.videoId),
+            ).fold(
+                onSuccess = {
+                    libraryStale = true
+                    _detailStack.value = _detailStack.value.map { page ->
+                        val songs = (page.songs as? UiState.Success)?.data
+                        if (page.browseId != browseId || songs == null) {
+                            page
+                        } else {
+                            page.copy(
+                                songs = UiState.Success(
+                                    songs.filterNot { it.setVideoId == setVideoId },
+                                ),
+                            )
+                        }
+                    }
+                    _messages.tryEmit("Removed from playlist")
+                },
+                onFailure = { _messages.tryEmit(it.friendly()) },
+            )
+        }
+    }
+
+    fun renamePlaylist(playlist: UserPlaylist, title: String) {
+        if (!requireSignIn()) return
+        val name = title.trim()
+        if (name.isBlank() || name == playlist.title) return
+        viewModelScope.launch {
+            YtMusicRepository.renamePlaylist(playlist.playlistId, name).fold(
+                onSuccess = {
+                    _playlists.value = _playlists.value.map {
+                        if (it.playlistId == playlist.playlistId) it.copy(title = name) else it
+                    }
+                    libraryStale = true
+                    refresh(Feed.LIBRARY)
+                    _messages.tryEmit("Renamed to $name")
+                },
+                onFailure = { _messages.tryEmit(it.friendly()) },
+            )
+        }
+    }
+
+    fun deletePlaylist(playlist: UserPlaylist) {
+        if (!requireSignIn()) return
+        viewModelScope.launch {
+            YtMusicRepository.deletePlaylist(playlist.playlistId).fold(
+                onSuccess = {
+                    _playlists.value = _playlists.value
+                        .filterNot { it.playlistId == playlist.playlistId }
+                    // Its page may be the one open; a deleted playlist has
+                    // nothing left to show.
+                    _detailStack.value = _detailStack.value
+                        .filterNot { it.browseId == playlist.browseId }
+                    libraryStale = true
+                    refresh(Feed.LIBRARY)
+                    _messages.tryEmit("Deleted ${playlist.title}")
+                },
+                onFailure = { _messages.tryEmit(it.friendly()) },
+            )
+        }
+    }
+
+    /** Whether [browseId] is a playlist this account can be asked to edit. */
+    fun editablePlaylist(browseId: String?): UserPlaylist? {
+        if (browseId == null) return null
+        return _playlists.value.firstOrNull { it.browseId == browseId }
+    }
+
+    /**
+     * Guards every account write. All of them are signed-in-only, and the UI
+     * hides them for guests — this is the backstop for a session that expired
+     * between the menu opening and the tap.
+     */
+    private fun requireSignIn(): Boolean {
+        if (_signedIn.value) return true
+        _messages.tryEmit("Sign in to YouTube Music to do that")
+        return false
+    }
+
+    /**
+     * Whether the library needs re-fetching. Set by every write above and
+     * acted on when the tab is next opened, for the same reason [homeStale]
+     * exists: rearranging a page under whoever is reading it is worse than
+     * showing it a moment out of date.
+     */
+    private var libraryStale = false
+
+    /** Call when the library tab becomes visible. */
+    fun onLibraryShown() {
+        loadPlaylists()
+        if (!libraryStale) return
+        libraryStale = false
+        if (_library.value is UiState.Success) refresh(Feed.LIBRARY)
+    }
+
     init {
         startSearchPipeline()
         loadHome()
@@ -157,6 +557,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (_signedIn.value) {
             loadLibrary()
             loadAccount()
+            loadPlaylists()
         }
         viewModelScope.launch {
             // drop(1): the current value is just the count so far, not a play.
@@ -448,32 +849,51 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             var name: String? = null
             /** Set when the track list carries on past its first response. */
             var more: String? = null
-            val state = if (resolved == BrowseType.ARTIST) {
-                YtMusicRepository.artistPage(browseId).fold(
-                    onSuccess = { page ->
-                        sections = page.sections
-                        artwork = page.thumbnailUrl
-                        name = page.name
-                        if (page.songs.isEmpty()) {
-                            UiState.Error("No tracks here")
-                        } else {
-                            UiState.Success(page.songs.withArtwork(thumbnailUrl))
-                        }
-                    },
-                    onFailure = { UiState.Error(it.friendly()) },
-                )
-            } else {
-                YtMusicRepository.browseSongs(browseId).fold(
-                    onSuccess = { page ->
-                        if (page.songs.isEmpty()) {
-                            UiState.Error("No tracks here")
-                        } else {
-                            more = page.continuation
-                            UiState.Success(page.songs.withArtwork(thumbnailUrl))
-                        }
-                    },
-                    onFailure = { UiState.Error(it.friendly()) },
-                )
+            val state = when {
+                browseId == "local:downloads" -> {
+                    val context = getApplication<Application>()
+                    val songs = LocalMediaRepository.getDownloadedSongs(context)
+                    if (songs.isEmpty()) UiState.Error("No downloaded tracks in Downloads/BitChord")
+                    else UiState.Success(songs)
+                }
+                browseId == "local:all" -> {
+                    val context = getApplication<Application>()
+                    if (!LocalMediaRepository.hasStoragePermission(context)) {
+                        UiState.Error("Storage permission required to view local audio files")
+                    } else {
+                        val songs = LocalMediaRepository.getLocalMusic(context)
+                        if (songs.isEmpty()) UiState.Error("No audio files found on device")
+                        else UiState.Success(songs)
+                    }
+                }
+                resolved == BrowseType.ARTIST -> {
+                    YtMusicRepository.artistPage(browseId).fold(
+                        onSuccess = { page ->
+                            sections = page.sections
+                            artwork = page.thumbnailUrl
+                            name = page.name
+                            if (page.songs.isEmpty()) {
+                                UiState.Error("No tracks here")
+                            } else {
+                                UiState.Success(page.songs.withArtwork(thumbnailUrl))
+                            }
+                        },
+                        onFailure = { UiState.Error(it.friendly()) },
+                    )
+                }
+                else -> {
+                    YtMusicRepository.browseSongs(browseId).fold(
+                        onSuccess = { page ->
+                            if (page.songs.isEmpty()) {
+                                UiState.Error("No tracks here")
+                            } else {
+                                more = page.continuation
+                                UiState.Success(page.songs.withArtwork(thumbnailUrl))
+                            }
+                        },
+                        onFailure = { UiState.Error(it.friendly()) },
+                    )
+                }
             }
             // Update by id — the user may have pushed another page meanwhile.
             _detailStack.value = _detailStack.value.map {
@@ -491,6 +911,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // Only once the first page is on screen: [fillIn] appends to it,
             // and has nothing to append to before this.
             more?.let { fillIn(browseId, it, thumbnailUrl) }
+        }
+    }
+
+    fun reloadLocalDetail(browseId: String) {
+        viewModelScope.launch {
+            val context = getApplication<Application>()
+            val state: UiState<List<Song>> = when (browseId) {
+                "local:downloads" -> {
+                    val songs = LocalMediaRepository.getDownloadedSongs(context)
+                    if (songs.isEmpty()) UiState.Error("No downloaded tracks in Downloads/BitChord")
+                    else UiState.Success(songs)
+                }
+                "local:all" -> {
+                    if (!LocalMediaRepository.hasStoragePermission(context)) {
+                        UiState.Error("Storage permission required to view local audio files")
+                    } else {
+                        val songs = LocalMediaRepository.getLocalMusic(context)
+                        if (songs.isEmpty()) UiState.Error("No audio files found on device")
+                        else UiState.Success(songs)
+                    }
+                }
+                else -> return@launch
+            }
+            _detailStack.value = _detailStack.value.map {
+                if (it.browseId == browseId) {
+                    it.copy(songs = state)
+                } else it
+            }
         }
     }
 
@@ -570,6 +1018,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         loadHome()
         loadLibrary()
         loadAccount()
+        loadPlaylists()
     }
 
     fun signOut() {
@@ -578,6 +1027,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _signedIn.value = false
         _account.value = null
         _library.value = UiState.Loading
+        // Ratings and playlists belong to the account that just left; keeping
+        // them would show the next signed-in user someone else's hearts.
+        _likeOverrides.value = emptyMap()
+        _playlists.value = emptyList()
+        _songMenu.value = null
         loadHome()
     }
 

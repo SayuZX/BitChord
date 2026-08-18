@@ -79,6 +79,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.SingletonImageLoader
 import coil3.compose.AsyncImage
+import com.music.bitchord.ui.components.thumbnailBorder
 import com.music.bitchord.data.model.Account
 import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.settings.AudioQuality
@@ -490,7 +491,7 @@ private fun AccountCard(
                 model = account.thumbnailUrl,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.size(52.dp).clip(CircleShape),
+                modifier = Modifier.size(52.dp).clip(CircleShape).thumbnailBorder(CircleShape),
             )
         } else {
             Box(

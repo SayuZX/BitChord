@@ -65,7 +65,7 @@ object AppSettings {
      */
     val spatialAudio = MutableStateFlow(false)
     val playbackSpeed = MutableStateFlow(1.0f)
-    val themeMode = MutableStateFlow(ThemeMode.SYSTEM)
+    val themeMode = MutableStateFlow(ThemeMode.DARK)
 
     /** Keep playing similar music once the queue runs out. */
     val autoplay = MutableStateFlow(true)
@@ -103,8 +103,8 @@ object AppSettings {
         spatialAudio.value = prefs.getBoolean(KEY_SPATIAL_AUDIO, false)
         playbackSpeed.value = prefs.getFloat(KEY_SPEED, 1.0f)
         themeMode.value = runCatching {
-            ThemeMode.valueOf(prefs.getString(KEY_THEME, null) ?: "SYSTEM")
-        }.getOrDefault(ThemeMode.SYSTEM)
+            ThemeMode.valueOf(prefs.getString(KEY_THEME, null) ?: "DARK")
+        }.getOrDefault(ThemeMode.DARK)
         autoplay.value = prefs.getBoolean(KEY_AUTOPLAY, true)
         showNerdStats.value = prefs.getBoolean(KEY_NERD_STATS, false)
         reduceAnimation.value = prefs.getBoolean(KEY_REDUCE_ANIMATION, false)

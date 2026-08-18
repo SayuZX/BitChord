@@ -6,7 +6,9 @@ import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.TransferListener
+import com.music.bitchord.data.innertube.StreamResolver
 import java.io.InterruptedIOException
 
 /**
@@ -98,6 +100,12 @@ class ChunkedDataSource(
                     "range $position-${position + length - 1} refused for " +
                         "${spec.uri.getQueryParameter("c")}: ${e.message}",
                 )
+                // This is the only place a refusal of the *real* fetch is seen.
+                // Left here it is just a failed track; handed back, it is the
+                // one piece of evidence that retiring the client rests on.
+                if (e is HttpDataSource.InvalidResponseCodeException) {
+                    StreamResolver.onPlaybackRefused(spec.uri.toString(), e.responseCode)
+                }
             }
             throw e
         }
