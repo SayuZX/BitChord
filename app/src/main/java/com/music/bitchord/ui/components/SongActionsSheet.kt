@@ -84,7 +84,11 @@ import kotlinx.coroutines.launch
  * Everything that writes to the account is hidden outright when [signedIn] is
  * false rather than shown and refused. [libraryState] is null until the
  * lookup behind the menu lands, and stays null for a track YouTube offers no
- * library toggle for — in both cases there is no honest row to draw.
+ * library toggle for — in both cases there is no honest row to draw. The same
+ * goes for a track that is playing from a local file or a finished download
+ * (`song.localUri != null`): rating, playlists, library, downloading it again
+ * and sharing all assume a YouTube identity the file doesn't carry, so those
+ * rows drop out regardless of [signedIn].
  *
  * [showSleepTimer] and [onShare] are the player's extras: a sleep timer isn't a
  * property of some row in a list, so it only appears where it means something.
@@ -128,6 +132,9 @@ fun SongActionsSheet(
     val palette = rememberArtworkPalette(song.thumbnailUrl, artPx = ROW_ART_PX)
     val liked = likeStatus == LikeStatus.LIKE
     val disliked = likeStatus == LikeStatus.DISLIKE
+    // A local file or a finished download has no YouTube identity behind it to
+    // rate, save, queue into a playlist, fetch again, or share a link for.
+    val isOffline = song.localUri != null
 
     TintedSheet(palette = palette, imageUrl = song.thumbnailUrl, modifier = modifier) {
         if (pickingSleepTimer) {
@@ -138,7 +145,7 @@ fun SongActionsSheet(
         SheetTrackHeader(song, subtitleColor = palette.onBackgroundVariant)
         HorizontalDivider(thickness = 0.5.dp, color = palette.divider)
 
-        if (signedIn) {
+        if (signedIn && !isOffline) {
             ActionRow(
                 icon = if (liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
                 label = if (liked) "Remove from Liked Music" else "Like",
@@ -187,7 +194,9 @@ fun SongActionsSheet(
             )
         }
 
-        DownloadRow(song, palette, onDownload)
+        if (!isOffline) {
+            DownloadRow(song, palette, onDownload)
+        }
         ActionRow(
             icon = Icons.AutoMirrored.Rounded.PlaylistPlay,
             label = "Play next",
@@ -214,8 +223,10 @@ fun SongActionsSheet(
                 accent = palette.accent,
             ) { pickingSleepTimer = true }
         }
-        onShare?.let {
-            ActionRow(Icons.Rounded.Share, "Share", accent = palette.accent, onClick = it)
+        if (!isOffline) {
+            onShare?.let {
+                ActionRow(Icons.Rounded.Share, "Share", accent = palette.accent, onClick = it)
+            }
         }
         Spacer(Modifier.height(24.dp))
     }

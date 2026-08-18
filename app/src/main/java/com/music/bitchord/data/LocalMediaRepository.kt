@@ -130,6 +130,7 @@ object LocalMediaRepository {
                 val albumCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
                 val albumIdCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
                 val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+                val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
 
                 val albumArtBaseUri = Uri.parse("content://media/external/audio/albumart")
 
@@ -140,6 +141,7 @@ object LocalMediaRepository {
                     val rawAlbum = cursor.getString(albumCol)
                     val albumId = cursor.getLong(albumIdCol)
                     val durationMs = cursor.getLong(durationCol)
+                    val path = cursor.getString(dataCol)
 
                     val contentUri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id).toString()
                     val title = rawTitle.takeUnless { it.isNullOrBlank() } ?: "Track $id"
@@ -157,6 +159,7 @@ object LocalMediaRepository {
                             durationText = durationText,
                             albumName = albumName,
                             localUri = contentUri,
+                            localPath = path,
                         )
                     )
                 }

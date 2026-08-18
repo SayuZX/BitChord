@@ -48,6 +48,16 @@ import kotlin.math.sqrt
 data class ArtworkPalette(
     /** The page's background wash. */
     val background: Color,
+    /**
+     * The colour the artwork's own bottom edge blurs down to.
+     *
+     * A blur wide enough to lose the picture leaves the mean of what it
+     * sampled, so a page that starts from this colour where the artwork stops
+     * reads as that blur carrying on rather than as a second surface beginning.
+     * Lighter than [background], which the page still settles into further
+     * down — the artwork's colour is strongest right under the artwork.
+     */
+    val wash: Color,
     /** Fill for the glass buttons and chips that sit on [background]. */
     val elevated: Color,
     /** The artwork's own colour, contrast-corrected — titles, icons, Play. */
@@ -115,6 +125,7 @@ fun rememberArtworkPalette(
 
     val target = seed?.toPalette(dark) ?: ArtworkPalette(
         background = scheme.background,
+        wash = scheme.background,
         elevated = scheme.surfaceVariant,
         accent = scheme.primary,
         onBackground = scheme.onBackground,
@@ -129,6 +140,7 @@ fun rememberArtworkPalette(
     }
     return ArtworkPalette(
         background = animateColorAsState(target.background, spec, label = "tintBackground").value,
+        wash = animateColorAsState(target.wash, spec, label = "tintWash").value,
         elevated = animateColorAsState(target.elevated, spec, label = "tintElevated").value,
         accent = animateColorAsState(target.accent, spec, label = "tintAccent").value,
         onBackground = animateColorAsState(target.onBackground, spec, label = "tintOn").value,
@@ -159,8 +171,11 @@ private const val PALETTE_PX = 128
 /** Short: this is a surface settling into its colour, not an effect in itself. */
 private const val TINT_FADE_MS = 260
 
-/** The raw artwork colours: what the page is mostly made of, and its brightest note. */
-private data class Seed(val dominant: Color, val vibrant: Color)
+/**
+ * The raw artwork colours: what the page is mostly made of, its brightest
+ * note, and what its bottom edge averages out to.
+ */
+private data class Seed(val dominant: Color, val vibrant: Color, val edge: Color)
 
 private fun seedOf(bitmap: Bitmap): Seed? {
     fun swatches(builder: Palette.Builder) =
@@ -183,10 +198,42 @@ private fun seedOf(bitmap: Bitmap): Seed? {
         val hsl = FloatArray(3).also { ColorUtils.colorToHSL(swatch.rgb, it) }
         hsl[1] * sqrt(swatch.population.toFloat())
     }
-    return Seed(Color(dominant.rgb), Color(vibrant.rgb))
+    return Seed(Color(dominant.rgb), Color(vibrant.rgb), bitmap.bottomEdgeColor())
 }
 
 private const val SWATCH_COUNT = 24
+
+/**
+ * The mean of the artwork's bottom band — what a blur wide enough to lose the
+ * picture leaves behind at that edge.
+ *
+ * A flat mean rather than a quantised swatch on purpose: a blur has no notion
+ * of which colour is *important*, and the page under the artwork has to match
+ * what the blur actually produced, not what the picture is about.
+ */
+private fun Bitmap.bottomEdgeColor(): Color {
+    val band = (height * EDGE_BAND).toInt().coerceIn(1, height)
+    val pixels = IntArray(width * band)
+    getPixels(pixels, 0, width, 0, height - band, width, band)
+
+    var red = 0L
+    var green = 0L
+    var blue = 0L
+    pixels.forEach { pixel ->
+        red += (pixel shr 16) and 0xFF
+        green += (pixel shr 8) and 0xFF
+        blue += pixel and 0xFF
+    }
+    val count = pixels.size.coerceAtLeast(1)
+    return Color(
+        red = (red / count).toInt(),
+        green = (green / count).toInt(),
+        blue = (blue / count).toInt(),
+    )
+}
+
+/** How much of the artwork's height the edge colour is read from. */
+private const val EDGE_BAND = 0.18f
 
 private fun Seed.toPalette(dark: Boolean): ArtworkPalette = if (dark) {
     ArtworkPalette(
@@ -194,6 +241,14 @@ private fun Seed.toPalette(dark: Boolean): ArtworkPalette = if (dark) {
         // not so deep the hue is gone — the whole point is that the page is
         // recognisably *this* record's colour.
         background = dominant.withHsl(saturation = { it.coerceIn(0.20f, 0.62f) }, lightness = { 0.13f }),
+        // Follows the edge's own brightness within a band that stays clear of
+        // white body text at the top and of [background] at the bottom: a
+        // sleeve that ends dark hands over almost invisibly, one that ends
+        // bright leaves a page that is visibly lit from under the artwork.
+        wash = edge.withHsl(
+            saturation = { it.coerceIn(0.18f, 0.58f) },
+            lightness = { it.coerceIn(0.14f, 0.24f) },
+        ),
         elevated = dominant.withHsl(saturation = { it.coerceIn(0.20f, 0.62f) }, lightness = { 0.22f }),
         accent = vibrant.withHsl(
             saturation = { it.coerceAtLeast(0.55f) },
@@ -210,6 +265,10 @@ private fun Seed.toPalette(dark: Boolean): ArtworkPalette = if (dark) {
 } else {
     ArtworkPalette(
         background = dominant.withHsl(saturation = { it.coerceIn(0.14f, 0.50f) }, lightness = { 0.91f }),
+        wash = edge.withHsl(
+            saturation = { it.coerceIn(0.12f, 0.46f) },
+            lightness = { it.coerceIn(0.78f, 0.90f) },
+        ),
         elevated = dominant.withHsl(saturation = { it.coerceIn(0.14f, 0.50f) }, lightness = { 0.83f }),
         accent = vibrant.withHsl(
             saturation = { it.coerceAtLeast(0.55f) },

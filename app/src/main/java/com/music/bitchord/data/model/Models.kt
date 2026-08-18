@@ -32,6 +32,12 @@ data class Song(
      * Explicit content or file URI for local device tracks or downloaded audio.
      */
     val localUri: String? = null,
+    /**
+     * Real filesystem path backing [localUri], when MediaStore exposes one.
+     * Lets playback swap a content:// row for a raw file:// path on formats
+     * that need it — see [com.music.bitchord.playback.toMediaItem].
+     */
+    val localPath: String? = null,
 )
 
 /**

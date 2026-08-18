@@ -61,6 +61,15 @@ fun FrostedTopBar(
     hazeState: HazeState,
     scrolled: Boolean,
     modifier: Modifier = Modifier,
+    /**
+     * Whether the bar carries its own pane of glass.
+     *
+     * False where something behind it is already providing one — [TopFadeBlur]
+     * on a page whose artwork runs up under the status bar. Two panes over the
+     * same content is one too many, and this bar's is the one with the hard
+     * bottom edge.
+     */
+    ownBackdrop: Boolean = true,
     onBack: (() -> Unit)? = null,
     refreshing: Boolean = false,
     // A lambda, not a value: the drag changes every frame, and reading it in
@@ -74,7 +83,7 @@ fun FrostedTopBar(
         label = "topBarTitleAlpha",
     )
     val dividerColor by animateColorAsState(
-        targetValue = MaterialTheme.colorScheme.outline.copy(alpha = if (scrolled) 0.6f else 0f),
+        targetValue = MaterialTheme.colorScheme.outline.copy(alpha = if (scrolled && ownBackdrop) 0.6f else 0f),
         animationSpec = tween(220),
         label = "topBarDivider",
     )
@@ -84,10 +93,10 @@ fun FrostedTopBar(
         modifier = modifier
             .fillMaxWidth()
             .then(
-                if (reduceDynamicBlur) {
-                    Modifier.background(MaterialTheme.colorScheme.surface)
-                } else {
-                    Modifier.hazeEffect(
+                when {
+                    !ownBackdrop -> Modifier
+                    reduceDynamicBlur -> Modifier.background(MaterialTheme.colorScheme.surface)
+                    else -> Modifier.hazeEffect(
                         state = hazeState,
                         style = HazeMaterials.ultraThin(MaterialTheme.colorScheme.surface),
                     )

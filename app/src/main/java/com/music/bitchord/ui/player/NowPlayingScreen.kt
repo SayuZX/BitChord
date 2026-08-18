@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -137,6 +138,13 @@ private val ART_TITLE_GAP = 20.dp
 private val DISMISS_STRIP_HEIGHT = 44.dp
 /** The player's side margin. Scrollable panels reach back across it. */
 private val PLAYER_GUTTER = 30.dp
+/**
+ * How wide the player's content is ever allowed to get. A sleeve and a volume
+ * slider stretched right across a tablet aren't a bigger player, just a coarser
+ * one; past this the column stops growing and centres itself instead. Phones
+ * are narrower than this, so for them it does nothing.
+ */
+private val PLAYER_MAX_WIDTH = 560.dp
 
 /** Share of a lyric line's own length spent fading out, and its bounds. */
 private const val LYRIC_FADE_FRACTION = 0.28f
@@ -473,24 +481,37 @@ fun NowPlayingScreen(
                     .padding(horizontal = PLAYER_GUTTER),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+            // ---- Top and centre: artwork, then the credits ----
             // Everything that changes between the artwork and the queue lives
             // in this one weighted box, so the controls below it never move.
             BoxWithConstraints(
                 modifier = Modifier
                     .weight(1f)
+                    .widthIn(max = PLAYER_MAX_WIDTH)
                     .fillMaxWidth()
                     .padding(top = 14.dp, bottom = 18.dp),
             ) {
                 // Both states collapse the header, but only one of them owns
                 // the panel below it.
                 val p = if (lyricsOpen) 1f else queueProgress
-                val fullArt = maxWidth
+                // The sleeve is square, so it is bounded by whichever of the
+                // two axes runs out first: the player's width on a phone, or —
+                // on a tablet, where there is width to spare — the height left
+                // over once the credits row and the gap above it have had
+                // theirs. Sizing it off the width alone is what pushed the
+                // credits down across the scrubber on anything but a phone.
+                val fullArt = minOf(maxWidth, maxHeight - ART_TITLE_GAP - HEADER_HEIGHT)
+                    .coerceAtLeast(THUMB_SIZE)
                 // Artwork and the title row travel together as one block, so
                 // the pair sits centred while the queue is closed.
                 val groupTop = ((maxHeight - fullArt - ART_TITLE_GAP - HEADER_HEIGHT) / 2)
                     .coerceAtLeast(0.dp)
                 val artSize = lerp(fullArt, THUMB_SIZE, p)
                 val artTop = lerp(groupTop, 0.dp, p)
+                // Expanded and height-bound, the sleeve is narrower than the
+                // player and has to be centred in it; collapsed, it belongs
+                // hard against the left edge with the credits beside it.
+                val artStart = lerp((maxWidth - fullArt) / 2, 0.dp, p)
                 val titleTop = lerp(groupTop + fullArt + ART_TITLE_GAP, 0.dp, p)
                 val titleStart = lerp(0.dp, THUMB_SIZE + 12.dp, p)
 
@@ -501,7 +522,7 @@ fun NowPlayingScreen(
                 var artLoaded by remember(song.videoId) { mutableStateOf(false) }
                 Box(
                     modifier = Modifier
-                        .offset(y = artTop)
+                        .offset(x = artStart, y = artTop)
                         .size(artSize)
                         .graphicsLayer {
                             // The paused shrink and the swipe nudge only make
@@ -628,8 +649,10 @@ fun NowPlayingScreen(
                     // Beside the credits rather than down in the toggle row:
                     // liking is about *this song*, and the row below is about
                     // how the queue plays. Guests get nothing to tap, since
-                    // there's no account to record it against.
-                    if (signedIn) {
+                    // there's no account to record it against — and neither
+                    // does a local file or a finished download, which carries
+                    // no YouTube identity to rate.
+                    if (signedIn && song.localUri == null) {
                         val liked = likeStatus == LikeStatus.LIKE
                         CircleGlyph(
                             icon = if (liked) BitChordIcons.HeartFilled else BitChordIcons.Heart,
@@ -644,40 +667,6 @@ fun NowPlayingScreen(
                         contentDescription = "More",
                         onClick = onOpenMenu,
                     )
-                }
-
-                // Current lyric, one line, directly under the credits.
-                if (!queueOpen && !lyricsOpen) {
-                    if (!lyrics.isNullOrEmpty()) {
-                        CurrentLyricLine(
-                            lines = lyrics,
-                            trackKey = song.videoId,
-                            positionMs = positionMs,
-                            isPlaying = isPlaying,
-                            durationMs = durationMs,
-                            onClick = {
-                                queueOpen = false
-                                lyricsOpen = true
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .offset(y = titleTop + HEADER_HEIGHT + 2.dp),
-                        )
-                    } else if (lyricsUnavailable) {
-                        LyricsUnavailableLine(
-                            trackKey = song.videoId,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .offset(y = titleTop + HEADER_HEIGHT + 2.dp),
-                        )
-                    } else {
-                        LyricsLoadingLine(
-                            trackKey = song.videoId,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .offset(y = titleTop + HEADER_HEIGHT + 2.dp),
-                        )
-                    }
                 }
 
                 if (lyricsOpen) {
@@ -717,8 +706,57 @@ fun NowPlayingScreen(
                 }
             }
 
-            // ---- Scrubber, transport, volume, toggles ----
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            // ---- Bottom: lyric strip, scrubber, transport, volume, toggles ----
+            // One block, measured at its natural height and pinned to the foot
+            // of the player. Whatever is left over above it is the artwork's,
+            // which is what keeps this row of controls in the same place on
+            // every screen instead of being shoved off the bottom of a tall one.
+            Column(
+                modifier = Modifier
+                    .widthIn(max = PLAYER_MAX_WIDTH)
+                    .fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+            // Current lyric, one line, directly above the scrubber. It stays in
+            // the layout while the queue is open and only fades — dropping it
+            // would shorten this block, and the controls under it would jump
+            // the moment the queue started sliding in.
+            if (!lyricsOpen) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // The slider's touch target reaches ~13dp above the
+                        // drawn bar, so the strip reads as further off it than
+                        // it is. Nudged down into that dead space, the same way
+                        // the timestamps below are pulled back up into it.
+                        .offset(y = 6.dp)
+                        .graphicsLayer { alpha = 1f - queueProgress },
+                ) {
+                    if (!lyrics.isNullOrEmpty()) {
+                        CurrentLyricLine(
+                            lines = lyrics,
+                            trackKey = song.videoId,
+                            positionMs = positionMs,
+                            isPlaying = isPlaying,
+                            durationMs = durationMs,
+                            // Faded out behind the queue, so it must not still
+                            // be a target for a tap meant for the list.
+                            onClick = { if (!queueOpen) lyricsOpen = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else if (lyricsUnavailable) {
+                        LyricsUnavailableLine(
+                            trackKey = song.videoId,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else {
+                        LyricsLoadingLine(
+                            trackKey = song.videoId,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            }
             ThinSlider(
                 value = shown,
                 onValueChange = {
@@ -996,7 +1034,11 @@ private fun LyricsPanel(
         if (!browsing && !listState.isScrollInProgress &&
             activeLine >= 0 && activeLine in lines.indices
         ) {
-            listState.animateScrollToItem(activeLine, scrollOffset = -180)
+            // A third of the way down the panel, whatever the panel's size — a
+            // fixed pixel offset lands in a different place on every screen,
+            // and on a tablet it put the playing line near the very top.
+            val third = listState.layoutInfo.viewportSize.height / 3
+            listState.animateScrollToItem(activeLine, scrollOffset = -third)
         }
     }
 

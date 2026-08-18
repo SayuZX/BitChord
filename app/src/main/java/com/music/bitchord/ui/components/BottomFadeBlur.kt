@@ -13,6 +13,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.music.bitchord.data.settings.AppSettings
@@ -31,6 +32,17 @@ private val FADE_HEIGHT = 180.dp
 
 /** Taller once the mini player is stacked on top of the tab bar. */
 private val FADE_HEIGHT_WITH_MINI_PLAYER = 248.dp
+
+/**
+ * How much blur the fade reaches at its outer edge — short of all of it.
+ *
+ * The last quarter buys almost nothing visually and costs the most: a blur has
+ * nothing to sample past the edge of its own layer, so the harder it is pushed
+ * there the more of the layer is flat material colour rather than blurred
+ * content, and the more that edge reads as a band of colour laid over the page.
+ * Stopping at three quarters keeps the ramp and loses the band.
+ */
+private const val PEAK = 0.75f
 
 /**
  * The frosted floor the floating bars sit on.
@@ -53,6 +65,13 @@ fun BottomFadeBlur(
     hazeState: HazeState,
     modifier: Modifier = Modifier,
     withMiniPlayer: Boolean = false,
+    /**
+     * The colour of the page at the very foot of the screen: the theme's
+     * background on a tab, and on a detail page the tint its wash settles into
+     * down here rather than the wash itself. See the effect below for why it
+     * cannot just be the theme's.
+     */
+    pageColor: Color = MaterialTheme.colorScheme.background,
 ) {
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
     // The floating bars fill themselves solid instead when blur is reduced,
@@ -76,16 +95,24 @@ fun BottomFadeBlur(
             .height(height)
             .hazeEffect(
                 state = hazeState,
-                // Keyed to `background`, not `surface` like the bars are.
-                // HazeStyle.backgroundColor is painted as an opaque rect under
-                // the sampled content, and the progressive gradient does not
-                // reach it — it only ramps the blur radius and the tint's
-                // alpha. Handing it `surface` therefore lays a solid #0D0D0F
-                // sheet over a pure-black page across the strip's whole height,
-                // which is a visible block of colour with a hard top edge.
-                // Matching the page's own colour makes the untouched top of the
-                // ramp an exact copy of what it covers.
-                style = HazeMaterials.ultraThin(MaterialTheme.colorScheme.background),
+                // Keyed to the colour of the page underneath, not the theme's.
+                //
+                // Both halves of this material are flat colour: the style's
+                // background is painted as an opaque rect under the sampled
+                // content, and its tint is a film at 0.55 alpha in dark mode.
+                // The progressive gradient reaches neither — it only ramps the
+                // blur radius and the tint's alpha — so wherever the blur has
+                // least to say, that flat colour is most of what is left. At
+                // the very foot of the strip it is nearly all of it, because a
+                // blur has nothing to sample past the bottom of its own layer.
+                //
+                // Given the theme's background that is invisible on a page
+                // which *is* that colour, and a dark band on a page which
+                // isn't — and a detail page is washed in its artwork's colour,
+                // so it got a black bar under the tab bar. Handed the page's
+                // own colour, the untouched edge is a copy of what it covers,
+                // and there is no band on any page.
+                style = HazeMaterials.ultraThin(pageColor),
             ) {
                 // A cubic ease-in rather than haze's default quadratic one: the
                 // ramp then holds under a few percent for the first half of the
@@ -94,7 +121,7 @@ fun BottomFadeBlur(
                 progressive = HazeProgressive.verticalGradient(
                     easing = EaseInCubic,
                     startIntensity = 0f,
-                    endIntensity = 1f,
+                    endIntensity = PEAK,
                 )
                 // Haze's film grain is uniform across the layer, so it shows up
                 // at the top as texture over content that is otherwise

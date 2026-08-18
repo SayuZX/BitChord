@@ -99,6 +99,7 @@ import com.music.bitchord.ui.components.BottomTab
 import com.music.bitchord.ui.components.FloatingBottomBar
 import com.music.bitchord.ui.components.FrostedTopBar
 import com.music.bitchord.ui.components.MiniPlayer
+import com.music.bitchord.ui.components.TopFadeBlur
 import com.music.bitchord.ui.components.UpdateAvailableDialog
 import com.music.bitchord.ui.icons.BitChordIcons
 import androidx.media3.common.Player
@@ -109,6 +110,7 @@ import com.music.bitchord.ui.screens.HomeScreen
 import com.music.bitchord.ui.screens.LibraryScreen
 import com.music.bitchord.ui.screens.SearchScreen
 import com.music.bitchord.ui.theme.BitChordTheme
+import com.music.bitchord.ui.theme.rememberArtworkPalette
 import com.music.bitchord.ui.theme.SystemBarIcons
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
@@ -431,18 +433,18 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     // 29 on, where MediaStore grants an app its own rows; notifications are
     // only asked for from API 33. So the branches below are mutually exclusive
     // by SDK level, and nothing here can stack two dialogs on each other.
-    var downloadPending by remember { mutableStateOf<Song?>(null) }
+    var downloadPending by remember { mutableStateOf<List<Song>>(emptyList()) }
     val notifyPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { /* Refusing costs the progress notification, not the download. */ }
     val storagePermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        val song = downloadPending
-        downloadPending = null
+        val songs = downloadPending
+        downloadPending = emptyList()
         when {
-            song == null -> Unit
-            granted -> Downloads.enqueue(context, song)
+            songs.isEmpty() -> Unit
+            granted -> songs.forEach { Downloads.enqueue(context, it) }
             // The one case where refusing is fatal: below API 29 there is no
             // other way to reach the Downloads folder.
             else -> Toast
@@ -459,30 +461,47 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
             Toast.makeText(context, "Storage permission is required to read local audio files", Toast.LENGTH_SHORT).show()
         }
     }
-    val startDownload: (Song) -> Unit = { song ->
-        val needsStorage = DownloadStore.needsLegacyPermission() &&
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE,
-            ) != PackageManager.PERMISSION_GRANTED
+    // Takes a list so a single tap on an album/playlist header can queue the
+    // whole thing — the permission dance only needs to happen once for the
+    // batch, not once per track.
+    val startDownload: (List<Song>) -> Unit = { requested ->
+        val saved = Downloads.saved.value
+        // Already on disk, and already queued or running: neither needs asking
+        // again. What's left is what a tap on "Download" actually means.
+        val songs = requested.filter { it.videoId !in saved }
+        if (songs.isNotEmpty()) {
+            val needsStorage = DownloadStore.needsLegacyPermission() &&
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                ) != PackageManager.PERMISSION_GRANTED
 
-        // Asked for here rather than at launch because here is where it means
-        // something: a download is the first thing this app does that the user
-        // is expected to walk away from.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            notifyPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            // Asked for here rather than at launch because here is where it means
+            // something: a download is the first thing this app does that the user
+            // is expected to walk away from.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                notifyPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+
+            if (needsStorage) {
+                downloadPending = songs
+                storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            } else {
+                songs.forEach { Downloads.enqueue(context, it) }
+            }
         }
-
-        if (needsStorage) {
-            downloadPending = song
-            storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-        } else {
-            Downloads.enqueue(context, song)
+        if (requested.size > 1) {
+            val message = if (songs.isEmpty()) {
+                "Already downloaded"
+            } else {
+                "Downloading ${songs.size} song" + if (songs.size == 1) "" else "s"
+            }
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -492,6 +511,13 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
         top = 96.dp,
         bottom = if (player.song != null) 210.dp else 140.dp,
     )
+
+    // What colour the page currently under the bars is. The fades either end
+    // of the screen are flat colour wherever their blur has least to say, so
+    // handing them the theme's background puts a black band on a page that is
+    // washed in an artwork's colour instead. Off a detail page this resolves
+    // to the theme's background anyway, which is exactly right there.
+    val detailPalette = rememberArtworkPalette(detail?.thumbnailUrl)
 
     Box(
         Modifier
@@ -560,6 +586,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                             )
                         }
                     },
+                    onDownloadAll = startDownload,
                     contentPadding = listPadding,
                 )
             } else when (selectedTab) {
@@ -697,6 +724,17 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
             }
         }
 
+        // A detail page's artwork runs up under the status bar, so the bar
+        // there is a fade rather than a pane — see [TopFadeBlur]. Drawn before
+        // the bar so the bar's own content sits on top of it.
+        if (detail != null) {
+            TopFadeBlur(
+                hazeState = hazeState,
+                pageColor = detailPalette.wash,
+                modifier = Modifier.align(Alignment.TopCenter),
+            )
+        }
+
         FrostedTopBar(
             title = when {
                 showSettings -> "Settings"
@@ -706,6 +744,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                 }
             },
             hazeState = hazeState,
+            ownBackdrop = detail == null,
             // Search has no large in-list header to hand the title back to —
             // the field takes that space — so its bar title is always up.
             scrolled = when {
@@ -752,6 +791,10 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
         BottomFadeBlur(
             hazeState = hazeState,
             withMiniPlayer = player.song != null,
+            // Not the wash: by the foot of the screen the page has finished
+            // easing out of it and into this, so this is what is actually
+            // under the tab bar.
+            pageColor = detailPalette.background,
             modifier = Modifier.align(Alignment.BottomCenter),
         )
 
@@ -968,7 +1011,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                     // Stays open: the row it replaces itself with is the
                     // progress, and closing the sheet would hide the only
                     // answer to "did that work?".
-                    onDownload = { startDownload(song) },
+                    onDownload = { startDownload(listOf(song)) },
                     // The sheet stays up for a rating: it shows the new state
                     // in place, and people often thumb a song and then queue it.
                     onToggleLike = { viewModel.toggleLike(song.videoId) },

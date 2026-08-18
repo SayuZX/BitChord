@@ -11,6 +11,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.SwipeToDismissBoxState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -34,7 +35,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -121,7 +124,7 @@ fun SongRow(
             }
             false // never actually dismiss; snap back
         },
-        positionalThreshold = { distance -> distance * 0.35f },
+        positionalThreshold = { distance -> distance * 0.5f },
     )
 
     if (onSwipeToQueue == null) {
@@ -132,7 +135,7 @@ fun SongRow(
     SwipeToDismissBox(
         state = swipeState,
         modifier = modifier,
-        backgroundContent = { QueueSwipeBackground() },
+        backgroundContent = { QueueSwipeBackground(swipeState) },
     ) {
         SongRowContent(
             song = song,
@@ -145,13 +148,26 @@ fun SongRow(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun QueueSwipeBackground() {
+private fun QueueSwipeBackground(swipeState: SwipeToDismissBoxState) {
     Row(
         modifier = Modifier
-            .fillMaxWidth()
+            .fillMaxSize()
+            .drawWithContent {
+                val offset = try { swipeState.requireOffset() } catch (e: Exception) { 0f }
+                if (offset > 0f) {
+                    clipRect(left = 0f, top = 0f, right = offset, bottom = size.height) {
+                        this@drawWithContent.drawContent()
+                    }
+                } else if (offset < 0f) {
+                    clipRect(left = size.width + offset, top = 0f, right = size.width, bottom = size.height) {
+                        this@drawWithContent.drawContent()
+                    }
+                }
+            }
             .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
-            .padding(horizontal = PAGE_GUTTER + 6.dp, vertical = 8.dp),
+            .padding(horizontal = PAGE_GUTTER + 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
@@ -192,7 +208,7 @@ private fun SongRowContent(
         modifier = modifier
             .fillMaxWidth()
             .combinedClickable(onClick = onClick, onLongClick = onLongPress)
-            .padding(horizontal = PAGE_GUTTER, vertical = 8.dp),
+            .padding(horizontal = PAGE_GUTTER, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (trackNumber != null) {

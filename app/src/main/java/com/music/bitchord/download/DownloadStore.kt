@@ -34,10 +34,10 @@ import java.io.OutputStream
  *    media scanner is told afterwards or the file stays invisible to everything
  *    that reads the index rather than the disk.
  *
- * Neither side writes tags. What arrives from googlevideo is a bare Opus
- * elementary stream in a WebM container, and putting a title inside it would
- * mean muxing rather than copying — so the filename carries the metadata, and
- * it is the only thing that does.
+ * Neither side writes tags — this class only ever copies the bytes googlevideo
+ * sends. [MediaTagger] rewrites the finished file afterwards to add them; the
+ * filename below is what every downloaded track carries regardless of
+ * whether that rewrite finds a layout it recognises.
  */
 object DownloadStore {
 

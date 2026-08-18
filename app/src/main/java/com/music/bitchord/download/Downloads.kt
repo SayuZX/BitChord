@@ -330,8 +330,10 @@ object Downloads {
                         (id to DownloadState.Running(written.toFloat() / total))
                 }
             }
-            remember(song, track, destination.commit())
+            val savedUri = destination.commit()
             pending = null
+            MediaTagger.embed(context, savedUri, track, stream.downloadExtension)
+            remember(song, track, savedUri)
             clear(id)
             Log.d(TAG, "saved $name")
         } catch (e: CancellationException) {
