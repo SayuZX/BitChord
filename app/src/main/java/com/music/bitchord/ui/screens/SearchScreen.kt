@@ -100,7 +100,7 @@ fun SearchScreen(
                 onQueryChange = onQueryChange,
                 onSubmit = onSubmit,
                 focusRequester = focusRequester,
-                modifier = Modifier.padding(horizontal = PAGE_GUTTER, vertical = 8.dp),
+                modifier = Modifier.padding(start = PAGE_GUTTER, end = PAGE_GUTTER, bottom = 8.dp),
             )
         }
         // The filters only mean something once there is a result set to narrow;

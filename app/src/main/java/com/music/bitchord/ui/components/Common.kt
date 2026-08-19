@@ -13,6 +13,13 @@ import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.SwipeToDismissBoxState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.layout.onSizeChanged
+import kotlin.math.abs
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -117,15 +124,23 @@ fun SongRow(
      */
     subtitleColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
 ) {
+    val swipeStateHolder = remember { mutableStateOf<SwipeToDismissBoxState?>(null) }
+    var boxWidth by remember { mutableFloatStateOf(0f) }
+
     val swipeState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
             if (value != SwipeToDismissBoxValue.Settled && onSwipeToQueue != null) {
-                onSwipeToQueue()
+                val offset = try { swipeStateHolder.value?.requireOffset() ?: 0f } catch (e: Exception) { 0f }
+                // Only queue if the physical drag reached half the box width, ignoring short accidental flings.
+                if (abs(offset) >= boxWidth * 0.45f) {
+                    onSwipeToQueue()
+                }
             }
             false // never actually dismiss; snap back
         },
         positionalThreshold = { distance -> distance * 0.5f },
     )
+    swipeStateHolder.value = swipeState
 
     if (onSwipeToQueue == null) {
         SongRowContent(song, onClick, onLongPress, modifier, trackNumber, subtitleColor)
@@ -134,7 +149,7 @@ fun SongRow(
 
     SwipeToDismissBox(
         state = swipeState,
-        modifier = modifier,
+        modifier = modifier.onSizeChanged { boxWidth = it.width.toFloat() },
         backgroundContent = { QueueSwipeBackground(swipeState) },
     ) {
         SongRowContent(
