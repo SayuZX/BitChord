@@ -180,6 +180,8 @@ fun SettingsScreen(
             SettingsRow(
                 icon = Icons.Rounded.Person,
                 title = "Account & scrobbling",
+                subtitle = account?.email?.takeIf { it.isNotBlank() }
+                    ?: if (signedIn) "Signed in" else "Not signed in",
                 onClick = onAccountScrobbling,
             )
         }

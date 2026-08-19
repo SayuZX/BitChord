@@ -234,9 +234,14 @@ object YtMusicRepository {
 
     /**
      * One page of a browse feed's tracks, and the token for the page after
-     * it — null once there is nothing more.
+     * it — null once there is nothing more. [suggested] is only ever
+     * non-empty for a playlist page — see [InnertubeParser.parsePlaylistShelf].
      */
-    data class SongPage(val songs: List<Song>, val continuation: String?)
+    data class SongPage(
+        val songs: List<Song>,
+        val continuation: String?,
+        val suggested: List<Song> = emptyList(),
+    )
 
     /**
      * The first page of an album/playlist's tracks, and nothing more.
@@ -256,13 +261,22 @@ object YtMusicRepository {
         pageOf(Innertube.browseContinuation(token))
     }
 
-    private fun pageOf(response: JsonObject) = SongPage(
-        // One response can name the same track twice — an album page that
-        // also carries a "you might also like" shelf, say. Collecting into a
-        // map used to take care of that; paging by hand means saying so.
-        songs = InnertubeParser.collectSongsDeep(response).distinctBy { it.videoId },
-        continuation = InnertubeParser.continuationToken(response),
-    )
+    private fun pageOf(response: JsonObject): SongPage {
+        // A playlist page is scoped to its own shelf so its "Suggested
+        // tracks" never read as songs the user added — see
+        // parsePlaylistShelf. Anything else (album, library, history) has no
+        // such shelf, and falls back to the layout-agnostic walk.
+        InnertubeParser.parsePlaylistShelf(response)?.let { shelf ->
+            return SongPage(shelf.songs, shelf.continuation, shelf.suggested)
+        }
+        return SongPage(
+            // One response can name the same track twice — an album page that
+            // also carries a "you might also like" shelf, say. Collecting into a
+            // map used to take care of that; paging by hand means saying so.
+            songs = InnertubeParser.collectSongsDeep(response).distinctBy { it.videoId },
+            continuation = InnertubeParser.continuationToken(response),
+        )
+    }
 
     /**
      * Every track behind a browse id, following continuations.
@@ -281,8 +295,12 @@ object YtMusicRepository {
         var response = Innertube.browse(browseId)
         var page = 1
         while (true) {
-            InnertubeParser.collectSongsDeep(response).forEach { out[it.videoId] = it }
-            val token = InnertubeParser.continuationToken(response)
+            // Same shelf-scoping as pageOf: a playlist (Liked Music and the
+            // Library Songs auto-playlist included) is read from its own
+            // shelf so a trailing "Suggested tracks" shelf never joins in.
+            val shelf = InnertubeParser.parsePlaylistShelf(response)
+            (shelf?.songs ?: InnertubeParser.collectSongsDeep(response)).forEach { out[it.videoId] = it }
+            val token = shelf?.continuation ?: InnertubeParser.continuationToken(response)
             if (token == null || page++ >= MAX_PAGES) break
             response = runCatching { Innertube.browseContinuation(token) }.getOrNull() ?: break
         }

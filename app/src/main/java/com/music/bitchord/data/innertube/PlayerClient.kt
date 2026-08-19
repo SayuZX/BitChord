@@ -186,7 +186,16 @@ data class PlayerClient(
          * resort. Kept here so a URL minted elsewhere that names it can still
          * be dressed correctly.
          */
-        private val WEB_REMIX = PlayerClient(
+        /**
+         * The browser identity music.youtube.com itself runs as. Not part of
+         * [StreamResolver]'s anonymous walk — sent bare, it is ciphered and
+         * refused about as often as it works. Worth reaching for on its own,
+         * ahead of anything else, when there is a signed-in session to send
+         * with it: a session cookie is what a browser-shaped client is
+         * supposed to carry, and Google answers a plausible one very
+         * differently to a device client with none at all.
+         */
+        val WEB_REMIX = PlayerClient(
             clientName = "WEB_REMIX",
             clientVersion = "1.20260707.12.00",
             clientId = "67",

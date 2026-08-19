@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
+import android.util.Log
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
@@ -83,6 +84,9 @@ class PlaybackService : MediaSessionService() {
 
     /** Last sampled position of the playing track, in seconds. */
     private var lastPositionSeconds = 0L
+
+    /** When the current track was chosen, for the time-to-first-audio log. */
+    private var trackSelectedAt: Long? = null
 
     private var scrobbleManager: ScrobbleManager? = null
     private var listenBrainzSong: Song? = null
@@ -179,6 +183,22 @@ class PlaybackService : MediaSessionService() {
         // playback starts and when the queue moves on while already playing.
         exoPlayer.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                // The only number that describes what a listener actually
+                // waits through. Every other timing in this app measures one
+                // leg of getting a track started — a resolve, a client walk, an
+                // extraction — and a leg being fast has repeatedly turned out
+                // to say nothing about whether sound arrived quickly, because
+                // the legs that were measured were the ones running in the
+                // background for tracks nobody was waiting on.
+                if (isPlaying) {
+                    trackSelectedAt?.let {
+                        Log.d(
+                            "BitChord",
+                            "TIMING first audio: ${SystemClock.elapsedRealtime() - it}ms since track selected",
+                        )
+                        trackSelectedAt = null
+                    }
+                }
                 if (isPlaying) registerCurrentPlay()
                 // Nothing to read ahead for while paused, and a pause is often
                 // the last thing that happens before the process goes idle.
@@ -203,6 +223,10 @@ class PlaybackService : MediaSessionService() {
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // Where the wait starts, for the log in onIsPlayingChanged.
+                trackSelectedAt = SystemClock.elapsedRealtime()
+                Log.d("BitChord", "TIMING track selected: ${mediaItem?.mediaId} (reason=$reason)")
+
                 // currentPosition already belongs to the new item by now, so
                 // the outgoing track is closed out on the last sampled value.
                 PlaybackTracker.onTrackChanged(lastPositionSeconds)
@@ -427,13 +451,18 @@ class PlaybackService : MediaSessionService() {
     }
 
     /**
-     * Hands the cache the track being played and the one queued behind it.
+     * Hands the cache the queue ahead of the one playing: [AudioCache.QUEUE_DEPTH]
+     * tracks is more than it does anything with, but it decides that, not this.
      */
     private fun prefetchAround(player: ExoPlayer) {
-        val next = player.nextMediaItemIndex
-            .takeIf { it != C.INDEX_UNSET }
-            ?.let { player.getMediaItemAt(it).mediaId }
-        AudioCache.prefetchNext(next)
+        val nextIndex = player.nextMediaItemIndex
+        val upcomingIds = if (nextIndex != C.INDEX_UNSET) {
+            val end = (nextIndex + AudioCache.QUEUE_DEPTH - 1).coerceAtMost(player.mediaItemCount - 1)
+            (nextIndex..end).map { player.getMediaItemAt(it).mediaId }
+        } else {
+            emptyList()
+        }
+        AudioCache.prefetchQueue(upcomingIds)
     }
 
     /**

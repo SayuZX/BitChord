@@ -30,13 +30,12 @@ import androidx.compose.material.icons.rounded.Downloading
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
-import androidx.compose.material.icons.rounded.LibraryAdd
-import androidx.compose.material.icons.rounded.LibraryAddCheck
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlaylistRemove
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.ThumbDown
 import androidx.compose.material.icons.rounded.ThumbDownOffAlt
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -63,7 +62,6 @@ import coil3.compose.AsyncImage
 import com.music.bitchord.data.model.LikeStatus
 import com.music.bitchord.data.model.ROW_ART_PX
 import com.music.bitchord.data.model.Song
-import com.music.bitchord.data.model.SongMenu
 import com.music.bitchord.data.model.artworkAt
 import com.music.bitchord.download.DownloadState
 import com.music.bitchord.download.Downloads
@@ -82,13 +80,11 @@ import kotlinx.coroutines.launch
  * always the fallback for "I meant to do something with this song".
  *
  * Everything that writes to the account is hidden outright when [signedIn] is
- * false rather than shown and refused. [libraryState] is null until the
- * lookup behind the menu lands, and stays null for a track YouTube offers no
- * library toggle for — in both cases there is no honest row to draw. The same
- * goes for a track that is playing from a local file or a finished download
- * (`song.localUri != null`): rating, playlists, library, downloading it again
- * and sharing all assume a YouTube identity the file doesn't carry, so those
- * rows drop out regardless of [signedIn].
+ * false rather than shown and refused. The same goes for a track that is
+ * playing from a local file or a finished download (`song.localUri != null`):
+ * rating, playlists, downloading it again and sharing all assume a YouTube
+ * identity the file doesn't carry, so those rows drop out regardless of
+ * [signedIn].
  *
  * [showSleepTimer] and [onShare] are the player's extras: a sleep timer isn't a
  * property of some row in a list, so it only appears where it means something.
@@ -109,20 +105,26 @@ fun SongActionsSheet(
     song: Song,
     signedIn: Boolean,
     likeStatus: LikeStatus,
-    libraryState: SongMenu?,
     onPlayNext: () -> Unit,
     onAddToQueue: () -> Unit,
     onDownload: () -> Unit,
     onToggleLike: () -> Unit,
     onToggleDislike: () -> Unit,
     onAddToPlaylist: () -> Unit,
-    onToggleLibrary: () -> Unit,
     onOpenAlbum: (String) -> Unit,
     onOpenArtist: (String) -> Unit,
     modifier: Modifier = Modifier,
     onRemoveFromPlaylist: (() -> Unit)? = null,
     showSleepTimer: Boolean = false,
     onShare: (() -> Unit)? = null,
+    /**
+     * True while a lookup for this track's album/artist ids is still in
+     * flight, so it isn't yet known whether "Open album" and "Open artist"
+     * belong on this sheet at all. Only the player ever opens a sheet before
+     * it knows; everywhere else this is simply false, and the two rows behave
+     * as before — present when the id is there, absent when it never was.
+     */
+    resolvingLinks: Boolean = false,
 ) {
     var pickingSleepTimer by remember { mutableStateOf(false) }
     // Read from the thumbnail the row that opened this sheet was already
@@ -166,19 +168,6 @@ fun SongActionsSheet(
                 accent = palette.accent,
                 onClick = onAddToPlaylist,
             )
-            libraryState?.let { state ->
-                ActionRow(
-                    icon = if (state.inLibrary) {
-                        Icons.Rounded.LibraryAddCheck
-                    } else {
-                        Icons.Rounded.LibraryAdd
-                    },
-                    label = if (state.inLibrary) "Remove from library" else "Save to library",
-                    tint = if (state.inLibrary) palette.accent else null,
-                    accent = palette.accent,
-                    onClick = onToggleLibrary,
-                )
-            }
             onRemoveFromPlaylist?.let {
                 ActionRow(
                     icon = Icons.Rounded.PlaylistRemove,
@@ -194,9 +183,7 @@ fun SongActionsSheet(
             )
         }
 
-        if (!isOffline) {
-            DownloadRow(song, palette, onDownload)
-        }
+        DownloadRow(song, palette, isOffline, onDownload)
         ActionRow(
             icon = Icons.AutoMirrored.Rounded.PlaylistPlay,
             label = "Play next",
@@ -209,11 +196,13 @@ fun SongActionsSheet(
             accent = palette.accent,
             onClick = onAddToQueue,
         )
-        song.albumId?.let { id ->
-            ActionRow(Icons.Rounded.Album, "Open album", accent = palette.accent) { onOpenAlbum(id) }
+        when (val id = song.albumId) {
+            null -> if (resolvingLinks) LoadingActionRow(Icons.Rounded.Album, "Open album", palette)
+            else -> ActionRow(Icons.Rounded.Album, "Open album", accent = palette.accent) { onOpenAlbum(id) }
         }
-        song.artistId?.let { id ->
-            ActionRow(Icons.Rounded.Person, "Open artist", accent = palette.accent) { onOpenArtist(id) }
+        when (val id = song.artistId) {
+            null -> if (resolvingLinks) LoadingActionRow(Icons.Rounded.Person, "Open artist", palette)
+            else -> ActionRow(Icons.Rounded.Person, "Open artist", accent = palette.accent) { onOpenArtist(id) }
         }
         if (showSleepTimer) {
             ActionRow(
@@ -302,7 +291,7 @@ private val SHEET_SHAPE = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
  * arrangement the sleep timer row already uses.
  */
 @Composable
-private fun DownloadRow(song: Song, palette: ArtworkPalette, onDownload: () -> Unit) {
+private fun DownloadRow(song: Song, palette: ArtworkPalette, isOffline: Boolean, onDownload: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val active by Downloads.active.collectAsStateWithLifecycle()
@@ -365,7 +354,7 @@ private fun DownloadRow(song: Song, palette: ArtworkPalette, onDownload: () -> U
                 tint = palette.accent,
                 accent = palette.accent,
             ) { scope.launch { Downloads.delete(context, song.videoId) } }
-        } else {
+        } else if (!isOffline) {
             ActionRow(
                 icon = Icons.Rounded.Download,
                 label = "Download",
@@ -546,6 +535,41 @@ internal fun ActionRow(
                 maxLines = 1,
             )
         }
+    }
+}
+
+/**
+ * Stands in for [ActionRow] while whether it belongs on the sheet at all is
+ * still unknown — "Open album" or "Open artist" before the lookup for their
+ * ids has come back. A spinner rather than the row simply being missing, so
+ * it doesn't read as decided against until it actually is.
+ */
+@Composable
+private fun LoadingActionRow(icon: ImageVector, label: String, palette: ArtworkPalette) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 22.dp, vertical = 15.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = palette.onBackground.copy(alpha = 0.4f),
+            modifier = Modifier.size(22.dp),
+        )
+        Spacer(Modifier.width(18.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = palette.onBackground.copy(alpha = 0.4f),
+            modifier = Modifier.weight(1f),
+        )
+        CircularProgressIndicator(
+            color = palette.onBackgroundVariant,
+            strokeWidth = 2.dp,
+            modifier = Modifier.size(16.dp),
+        )
     }
 }
 

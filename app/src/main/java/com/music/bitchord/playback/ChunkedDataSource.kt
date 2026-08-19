@@ -93,7 +93,7 @@ class ChunkedDataSource(
             // Which client minted the URL is the first thing worth knowing when
             // a range is refused, and it isn't recoverable from anywhere else by
             // the time this surfaces as a playback error. A cancelled read-ahead
-            // arrives here too and means nothing — see [AudioCache.prefetchNext].
+            // arrives here too and means nothing — see [AudioCache.prefetchQueue].
             if (e !is InterruptedIOException) {
                 Log.w(
                     TAG,

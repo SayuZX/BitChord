@@ -4,7 +4,9 @@ import android.util.Log
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.timeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.get
@@ -131,6 +133,9 @@ object Innertube {
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    /** See [postPlayer] — the per-request ceiling on the walk's hot path. */
+    private const val PLAYER_TIMEOUT_MS = 6_000L
+
     private val client = HttpClient(OkHttp) {
         // Same OkHttp instance ExoPlayer streams through — see Http.
         engine { preconfigured = com.music.bitchord.data.Http.client }
@@ -168,6 +173,19 @@ object Innertube {
         repeat(attempts - 1) {
             try {
                 return block()
+            } catch (e: HttpRequestTimeoutException) {
+                // Not weather, and not worth repeating. A timeout is this app's
+                // own decision that the request had long enough — so trying it
+                // again cannot learn anything the first attempt didn't, and the
+                // cost is multiplied rather than shared: [HttpRequestTimeoutException]
+                // is an [IOException], so before this branch existed every timed-out
+                // `player` call was quietly attempted three times. That turned a
+                // six-second ceiling into a nineteen-second one on a walk of
+                // seven clients, which is worse than the unbounded call the
+                // ceiling was added to prevent. Give up on this client and let
+                // the caller move to the next one.
+                Log.d(TAG, "not retrying, request timed out: ${e.message}")
+                throw e
             } catch (e: IOException) {
                 Log.d(TAG, "retrying: ${e.message}")
             }
@@ -239,8 +257,9 @@ object Innertube {
         videoId: String,
         client: PlayerClient,
         signatureTimestamp: Int? = null,
+        authenticated: Boolean = false,
     ): JsonObject {
-        val response = postPlayer(videoId, client, signatureTimestamp)
+        val response = postPlayer(videoId, client, signatureTimestamp, authenticated)
 
         val status = response["playabilityStatus"]?.jsonObject
             ?.get("status")?.jsonPrimitive?.content
@@ -556,20 +575,43 @@ object Innertube {
     }
 
     /**
-     * Deliberately unauthenticated.
+     * Unauthenticated by default.
      *
-     * The app clients this walks through are answered *because* they look like
-     * anonymous devices; attaching the session cookie to one is what gets it
-     * turned away with `LOGIN_REQUIRED`. Nothing about the account is needed to
-     * fetch audio — history is credited separately, by [playbackTracking] and
-     * the stats pings, which do carry the session.
+     * The app clients [StreamResolver] walks through are answered *because*
+     * they look like anonymous devices; attaching the session cookie to one
+     * of those is what gets it turned away with `LOGIN_REQUIRED`. Nothing
+     * about the account is needed to fetch audio through them — history is
+     * credited separately, by [playbackTracking] and the stats pings, which
+     * do carry the session.
+     *
+     * [authenticated] is the one deliberate exception: [PlayerClient.WEB_REMIX]
+     * is a browser identity, and a browser without the session cookie a
+     * signed-in listener actually has is the thing that reads as suspicious,
+     * not the other way around. Only meaningful with [cookie] set — a caller
+     * asking for it while signed out gets the same unauthenticated request as
+     * everything else.
      */
     private suspend fun postPlayer(
         videoId: String,
         playerClient: PlayerClient,
         signatureTimestamp: Int?,
+        authenticated: Boolean = false,
     ): JsonObject =
         client.post("${playerClient.apiBase()}/player") {
+            // A much tighter budget than the shared 30 seconds, because this is
+            // the one request on a loop. A player call that is going to answer
+            // answers in 120-330ms; one that is going to hang is indifferent to
+            // how long it is given, and there are up to seven clients walked
+            // per track, each of which may be retried. At the shared ceiling a
+            // single unlucky client turned a walk that normally costs two
+            // seconds into forty-nine, which the listener spends staring at a
+            // track that will in the end be served by extraction anyway. Six
+            // seconds is twenty times a healthy answer and cheap to give up on.
+            //
+            // Set here rather than on the shared client on purpose: browse and
+            // search return payloads orders of magnitude larger over the same
+            // connection, and a ceiling right for this would truncate those.
+            timeout { requestTimeoutMillis = PLAYER_TIMEOUT_MS }
             contentType(ContentType.Application.Json)
             parameter("prettyPrint", "false")
             header("User-Agent", playerClient.userAgent)
@@ -580,6 +622,13 @@ object Innertube {
             // Shared with browse/search so one session is seen throughout,
             // rather than a device that mints a new identity per request.
             visitorData?.let { header("X-Goog-Visitor-Id", it) }
+            if (authenticated) {
+                cookie?.let { c ->
+                    header("Cookie", c)
+                    header("X-Goog-AuthUser", "0")
+                    sapisidFrom(c)?.let { header("Authorization", sapisidHash(it)) }
+                }
+            }
             setBody(
                 buildJsonObject {
                     putJsonObject("context") {

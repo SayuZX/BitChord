@@ -28,6 +28,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -143,6 +144,8 @@ fun DetailScreen(
     onShuffle: (List<Song>) -> Unit,
     onSectionItemClick: (ShelfItem) -> Unit,
     onDownloadAll: (List<Song>) -> Unit,
+    onArtistClick: (String, String) -> Unit,
+    onAddSuggested: (Song) -> Unit,
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
@@ -197,6 +200,7 @@ fun DetailScreen(
                         // A page of on-device tracks has nothing further away
                         // to fetch — everything on it is already local.
                         onDownload = onDownloadAll.takeUnless { page.browseId.startsWith("local:") },
+                        onArtistClick = onArtistClick,
                     )
                 }
             }
@@ -268,6 +272,33 @@ fun DetailScreen(
                 }
             }
 
+            // Tracks YouTube offers to round the playlist out, never folded
+            // into the list above — see [DetailPage.suggestedSongs].
+            if (page.suggestedSongs.isNotEmpty()) {
+                item(key = "suggested-heading") {
+                    SectionHeading("Suggested", palette)
+                }
+                itemsIndexed(
+                    page.suggestedSongs,
+                    key = { _, song -> "suggested-${song.videoId}" },
+                ) { index, song ->
+                    SuggestedSongRow(
+                        song = song,
+                        palette = palette,
+                        onClick = { onSongClick(page.suggestedSongs, index) },
+                        onLongPress = { onSongLongPress(song) },
+                        onAdd = { onAddSuggested(song) },
+                    )
+                    if (index < page.suggestedSongs.lastIndex) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(start = ROW_DIVIDER_INSET),
+                            thickness = 0.5.dp,
+                            color = palette.divider,
+                        )
+                    }
+                }
+            }
+
             // Albums / Singles & EPs carousels (artist pages).
             items(page.sections) { shelf ->
                 Column(Modifier.padding(top = 22.dp)) {
@@ -309,8 +340,13 @@ private fun ReleaseHeader(
     onPlay: () -> Unit,
     onShuffle: () -> Unit,
     onDownload: ((List<Song>) -> Unit)?,
+    onArtistClick: (String, String) -> Unit,
 ) {
     val (credit, meta) = page.headerLines(trackCount)
+    // Every row on a release carries the same credit — see [pageCredit] — so
+    // the first one speaks for the whole page, the same source the rows'
+    // own long-press "Open artist" already reads from.
+    val artist = songs.firstOrNull()
 
     // The outer Box just needs to be as tall as its content — we don't force
     // an aspect ratio here so the action buttons can extend below the artwork.
@@ -345,7 +381,17 @@ private fun ReleaseHeader(
                     textAlign = TextAlign.Center,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = HEADER_GUTTER),
+                    modifier = Modifier
+                        .padding(horizontal = HEADER_GUTTER)
+                        .let { m ->
+                            val id = artist?.artistId
+                            if (id == null) {
+                                m
+                            } else {
+                                m.clip(RoundedCornerShape(6.dp))
+                                    .clickable { onArtistClick(id, artist.artist) }
+                            }
+                        },
                 )
             }
             // Metadata (kind • year • count)
@@ -780,6 +826,74 @@ private fun CompactSongRow(
                 Icons.Rounded.MoreVert,
                 contentDescription = "More",
                 tint = palette.onBackgroundVariant,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
+}
+
+/**
+ * A row under "Suggested" — a track YouTube offers to round the playlist
+ * out but that was never added. [onAdd] is the point of the row, so it gets
+ * the trailing spot a track already on the playlist spends on "more"; the
+ * long-press sheet is still one gesture away for anything else.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SuggestedSongRow(
+    song: Song,
+    palette: ArtworkPalette,
+    onClick: () -> Unit,
+    onLongPress: () -> Unit,
+    onAdd: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(onClick = onClick, onLongClick = onLongPress)
+            .padding(horizontal = PAGE_GUTTER, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AsyncImage(
+            model = song.artworkAt(ROW_ART_PX),
+            contentDescription = null,
+            modifier = Modifier
+                .size(52.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .thumbnailBorder(RoundedCornerShape(8.dp))
+                .background(palette.elevated),
+        )
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = song.title,
+                style = MaterialTheme.typography.titleMedium,
+                color = palette.onBackground,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = song.artist,
+                style = MaterialTheme.typography.bodyMedium,
+                color = palette.onBackgroundVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(palette.accent.copy(alpha = 0.16f))
+                .clickable(onClick = onAdd),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Rounded.Add,
+                contentDescription = "Add to playlist",
+                tint = palette.accent,
                 modifier = Modifier.size(20.dp),
             )
         }

@@ -11,6 +11,7 @@ import com.music.bitchord.data.lyrics.LrcLib
 import com.music.bitchord.data.lyrics.LyricLine
 import com.music.bitchord.data.innertube.Innertube
 import com.music.bitchord.data.innertube.PlaybackTracker
+import com.music.bitchord.data.innertube.StreamResolver
 import com.music.bitchord.data.model.Account
 import com.music.bitchord.data.model.BrowseType
 import com.music.bitchord.data.model.DetailPage
@@ -31,10 +32,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
@@ -163,17 +162,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- Ratings, library and playlists -------------------------------------
 
     /**
-     * One-line results of the account writes below — "Added to Chill", "Signed
-     * out". A flow rather than a state so the same message twice in a row is
-     * shown twice, and so nothing is left on screen after it has been read.
-     */
-    private val _messages = MutableSharedFlow<String>(
-        extraBufferCapacity = 4,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST,
-    )
-    val messages: SharedFlow<String> = _messages.asSharedFlow()
-
-    /**
      * Ratings this session has set, which win over whatever the library feed
      * last said.
      *
@@ -220,19 +208,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // demoting it — see [forgetFromLibrary].
                     val unliked = previous == LikeStatus.LIKE &&
                         status == LikeStatus.INDIFFERENT
-                    val alsoRemoved = unliked && forgetFromLibrary(videoId)
-                    _messages.tryEmit(
-                        when {
-                            status == LikeStatus.LIKE -> "Added to Liked Music"
-                            status == LikeStatus.DISLIKE -> "Disliked"
-                            alsoRemoved -> "Removed from Liked Music and library"
-                            else -> "Removed from Liked Music"
-                        },
-                    )
+                    if (unliked) forgetFromLibrary(videoId)
                 },
                 onFailure = {
                     _likeOverrides.value += (videoId to previous)
-                    _messages.tryEmit(it.friendly())
                 },
             )
         }
@@ -350,36 +329,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * Adds or removes the open menu's track from the library.
-     *
-     * Takes no video id because it can't use one: the request is the token in
-     * [songMenu], which is why the row it belongs to isn't drawn until that
-     * lookup lands.
-     */
-    fun toggleLibrary() {
-        val menu = _songMenu.value ?: return
-        val token = if (menu.inLibrary) {
-            menu.removeFromLibraryToken
-        } else {
-            menu.addToLibraryToken
-        } ?: return
-        val added = !menu.inLibrary
-        _songMenu.value = menu.copy(inLibrary = added)
-        viewModelScope.launch {
-            YtMusicRepository.setLibraryStatus(token).fold(
-                onSuccess = {
-                    libraryStale = true
-                    _messages.tryEmit(if (added) "Saved to library" else "Removed from library")
-                },
-                onFailure = {
-                    _songMenu.value = _songMenu.value?.copy(inLibrary = !added)
-                    _messages.tryEmit(it.friendly())
-                },
-            )
-        }
-    }
-
     /** The account's own playlists, for the picker and the library tab. */
     private val _playlists = MutableStateFlow<List<UserPlaylist>>(emptyList())
     val playlists: StateFlow<List<UserPlaylist>> = _playlists.asStateFlow()
@@ -408,11 +357,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!requireSignIn()) return
         viewModelScope.launch {
             YtMusicRepository.addToPlaylist(playlist.playlistId, listOf(song.videoId)).fold(
-                onSuccess = {
-                    libraryStale = true
-                    _messages.tryEmit("Added to ${playlist.title}")
-                },
-                onFailure = { _messages.tryEmit(it.friendly()) },
+                onSuccess = { libraryStale = true },
+                onFailure = {},
             )
         }
     }
@@ -435,11 +381,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     libraryStale = true
                     loadPlaylists()
                     refresh(Feed.LIBRARY)
-                    _messages.tryEmit(
-                        if (song != null) "Added to $name" else "Created $name",
-                    )
                 },
-                onFailure = { _messages.tryEmit(it.friendly()) },
+                onFailure = {},
             )
         }
     }
@@ -471,9 +414,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             )
                         }
                     }
-                    _messages.tryEmit("Removed from playlist")
                 },
-                onFailure = { _messages.tryEmit(it.friendly()) },
+                onFailure = {},
+            )
+        }
+    }
+
+    /**
+     * Adds one of [DetailPage.suggestedSongs] to the playlist it was
+     * suggested for, and drops it from that section — the playlist's own
+     * track list only shows it correctly (with a working "remove") once the
+     * page is reopened, so there is nothing on screen for it to move to yet.
+     */
+    fun addSuggestedSong(browseId: String, song: Song) {
+        if (!requireSignIn()) return
+        val playlistId = browseId.removePrefix("VL")
+        viewModelScope.launch {
+            YtMusicRepository.addToPlaylist(playlistId, listOf(song.videoId)).fold(
+                onSuccess = {
+                    libraryStale = true
+                    _detailStack.value = _detailStack.value.map { page ->
+                        if (page.browseId != browseId) {
+                            page
+                        } else {
+                            page.copy(
+                                suggestedSongs = page.suggestedSongs
+                                    .filterNot { it.videoId == song.videoId },
+                            )
+                        }
+                    }
+                },
+                onFailure = {},
             )
         }
     }
@@ -490,9 +461,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     libraryStale = true
                     refresh(Feed.LIBRARY)
-                    _messages.tryEmit("Renamed to $name")
                 },
-                onFailure = { _messages.tryEmit(it.friendly()) },
+                onFailure = {},
             )
         }
     }
@@ -510,9 +480,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         .filterNot { it.browseId == playlist.browseId }
                     libraryStale = true
                     refresh(Feed.LIBRARY)
-                    _messages.tryEmit("Deleted ${playlist.title}")
                 },
-                onFailure = { _messages.tryEmit(it.friendly()) },
+                onFailure = {},
             )
         }
     }
@@ -528,11 +497,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * hides them for guests — this is the backstop for a session that expired
      * between the menu opening and the tap.
      */
-    private fun requireSignIn(): Boolean {
-        if (_signedIn.value) return true
-        _messages.tryEmit("Sign in to YouTube Music to do that")
-        return false
-    }
+    private fun requireSignIn(): Boolean = _signedIn.value
 
     /**
      * Whether the library needs re-fetching. Set by every write above and
@@ -805,12 +770,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             UiState.Error("No results")
                         } else {
                             searchCache.put(key, rows)
+                            prefetchTopResult(rows)
                             UiState.Success(rows)
                         }
                     },
                     onFailure = { UiState.Error(it.friendly()) },
                 )
             }
+    }
+
+    /**
+     * Warms the stream URL for the top song result the instant results land,
+     * not when it's tapped. [AudioCache] gives a head start to whatever's
+     * already queued; a fresh search has nothing queued yet, and the top
+     * result is overwhelmingly what gets tapped — see [play][MainActivity.play].
+     * [resolveAudio][YtMusicRepository.resolveAudio] first, same as the tap
+     * path itself, so a video-tagged result warms the catalogue audio's id
+     * rather than one nothing will ever ask for.
+     */
+    private fun prefetchTopResult(rows: List<SearchResult>) {
+        val song = rows.filterIsInstance<SearchResult.Track>().firstOrNull()?.song ?: return
+        viewModelScope.launch {
+            runCatching {
+                StreamResolver.resolve(YtMusicRepository.resolveAudio(song).videoId)
+            }
+        }
     }
 
     private companion object {
@@ -849,6 +833,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             var name: String? = null
             /** Set when the track list carries on past its first response. */
             var more: String? = null
+            /** Tracks YouTube offers to round the playlist out — see [DetailPage.suggestedSongs]. */
+            var suggested: List<Song> = emptyList()
             val state = when {
                 browseId == "local:downloads" -> {
                     val context = getApplication<Application>()
@@ -888,6 +874,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                 UiState.Error("No tracks here")
                             } else {
                                 more = page.continuation
+                                suggested = page.suggested.withArtwork(thumbnailUrl)
                                 UiState.Success(page.songs.withArtwork(thumbnailUrl))
                             }
                         },
@@ -903,6 +890,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         sections = sections,
                         thumbnailUrl = artwork ?: it.thumbnailUrl,
                         title = name ?: it.title,
+                        suggestedSongs = suggested,
                     )
                 } else {
                     it
@@ -970,11 +958,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val added = fetched.songs
                     .filter { known.add(it.videoId) }
                     .withArtwork(artworkFallback)
+                // Suggestions can arrive on a later page than the real
+                // tracks, once the playlist's own continuation runs dry —
+                // see parsePlaylistShelf — so they're tracked separately
+                // rather than folded into [known].
+                val knownSuggested = current.suggestedSongs.mapTo(HashSet()) { it.videoId }
+                val addedSuggested = fetched.suggested
+                    .filter { it.videoId !in known && knownSuggested.add(it.videoId) }
+                    .withArtwork(artworkFallback)
                 // A page with nothing new on it means the feed has looped back
                 // rather than run dry with a token still attached.
-                if (added.isEmpty()) return@launch
+                if (added.isEmpty() && addedSuggested.isEmpty()) return@launch
                 _detailStack.value = stack.toMutableList().also {
-                    it[index] = current.copy(songs = UiState.Success(existing + added))
+                    it[index] = current.copy(
+                        songs = UiState.Success(existing + added),
+                        suggestedSongs = current.suggestedSongs + addedSuggested,
+                    )
                 }
                 next = fetched.continuation
             }

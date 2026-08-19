@@ -122,6 +122,8 @@ fun MediaItem.toSong() = Song(
     artist = mediaMetadata.artist?.toString().orEmpty(),
     thumbnailUrl = mediaMetadata.artworkUri?.toString(),
     fromAutoplay = this.fromAutoplay,
+    localUri = mediaMetadata.extras?.getString(EXTRA_LOCAL_URI),
+    localPath = mediaMetadata.extras?.getString(EXTRA_LOCAL_PATH),
 )
 
 /** @see Song.fromAutoplay */
@@ -134,6 +136,12 @@ val MediaItem.fromAutoplay: Boolean
  * the player, and the UI only ever sees it back through a MediaController.
  */
 private const val EXTRA_FROM_AUTOPLAY = "bitchord.fromAutoplay"
+
+/** @see Song.localUri */
+private const val EXTRA_LOCAL_URI = "bitchord.localUri"
+
+/** @see Song.localPath */
+private const val EXTRA_LOCAL_PATH = "bitchord.localPath"
 
 /**
  * Where AutoPlay's section of the queue begins, and so where a track queued by
@@ -222,8 +230,25 @@ fun Song.toMediaItem(): MediaItem {
             .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
             .setIsPlayable(true)
             .setIsBrowsable(false)
-            // Which section of the queue this belongs to, carried with it.
-            .apply { if (fromAutoplay) setExtras(bundleOf(EXTRA_FROM_AUTOPLAY to true)) }
+            // What a queue entry has to carry about itself: which section of
+            // the queue it belongs to, and whether it is playing off the
+            // device. The uri two lines up answers the second question but
+            // does not survive the trip back out — Media3 leaves a MediaItem's
+            // localConfiguration out of the bundle it sends to a
+            // MediaController — so without this a track playing from a file
+            // reaches the UI looking like any other YouTube track, and the
+            // player's menu offers to rate, download and share it.
+            .apply {
+                if (fromAutoplay || localUri != null) {
+                    setExtras(
+                        bundleOf(
+                            EXTRA_FROM_AUTOPLAY to fromAutoplay,
+                            EXTRA_LOCAL_URI to localUri,
+                            EXTRA_LOCAL_PATH to localPath,
+                        ),
+                    )
+                }
+            }
             .build(),
     )
     .build()

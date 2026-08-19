@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.music.bitchord.data.settings.AppSettings
+import kotlin.math.roundToInt
 
 data class BottomTab(
     val label: String,
@@ -93,7 +94,7 @@ fun FloatingBottomBar(
     } else 0f
 
     val pillTargetPx = if (tabStepPx > 0f) {
-        selectedIndex * tabStepPx - dragOffset
+        selectedIndex * tabStepPx + dragOffset
     } else 0f
 
     val animatedPillOffset by animateFloatAsState(
@@ -105,7 +106,6 @@ fun FloatingBottomBar(
         label = "pillOffset",
     )
 
-    val tabStepDp = with(density) { tabStepPx.toDp() }
     var lastHapticTab by remember { mutableIntStateOf(selectedIndex) }
 
     LaunchedEffect(selectedIndex) { dragOffset = 0f }
@@ -142,12 +142,17 @@ fun FloatingBottomBar(
                         onDragStart = { totalDrag = 0f },
                         onDragCancel = { dragOffset = 0f },
                         onDragEnd = {
-                            val threshold = tabStepPx * 0.35f
-                            when {
-                                totalDrag > threshold && currentSelectedIndex < tabs.lastIndex ->
-                                    onTabSelected(currentSelectedIndex + 1)
-                                totalDrag < -threshold && currentSelectedIndex > 0 ->
-                                    onTabSelected(currentSelectedIndex - 1)
+                            if (tabStepPx > 0f) {
+                                val ratio = totalDrag / tabStepPx
+                                val shift = when {
+                                    ratio > 0.35f -> kotlin.math.max(1, ratio.roundToInt())
+                                    ratio < -0.35f -> kotlin.math.min(-1, ratio.roundToInt())
+                                    else -> 0
+                                }
+                                val newIndex = (currentSelectedIndex + shift).coerceIn(0, tabs.lastIndex)
+                                if (newIndex != currentSelectedIndex) {
+                                    onTabSelected(newIndex)
+                                }
                             }
                             dragOffset = 0f
                         },
@@ -160,12 +165,12 @@ fun FloatingBottomBar(
                                     totalDrag * 0.25f
                                 else -> totalDrag
                             }
-                            dragOffset = with(density) { rawPx.toDp().value }
+                            dragOffset = rawPx
 
                             val approxTab =
-                                (currentSelectedIndex - dragOffset / tabStepDp.value)
+                                (currentSelectedIndex + dragOffset / tabStepPx)
                                     .coerceIn(0f, tabs.lastIndex.toFloat())
-                                    .toInt()
+                                    .roundToInt()
                             if (approxTab != lastHapticTab) {
                                 haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 lastHapticTab = approxTab
