@@ -813,9 +813,18 @@ class PlaybackService : MediaSessionService() {
 
         /**
          * Outer cap on stream resolution. Individual client calls and probes
-         * have their own timeouts, but iterating all six plus the NewPipe
+         * have their own timeouts, but iterating all seven plus the NewPipe
          * fallback can accumulate far beyond what a listener should wait.
+         *
+         * The NewPipe fallback alone — a scrape of the watch page, shaped
+         * harder than anything else this app asks Google for — routinely
+         * takes 45-90s on its own when every player client is bot-checked, a
+         * state that has become the common case rather than the rare one. A
+         * cap shorter than that doesn't bound the wait; it cancels the
+         * resolve just as it was about to succeed, and the retry that
+         * follows restarts the same slow walk from zero, so the listener
+         * waits *longer* under a tighter cap than a looser one.
          */
-        const val RESOLVE_TIMEOUT_MS = 45_000L
+        const val RESOLVE_TIMEOUT_MS = 120_000L
     }
 }

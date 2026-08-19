@@ -37,3 +37,4 @@ keystore.properties
 # Project scratch / debug artifacts
 .shots/
 .tmp_verify/
+.debug/
