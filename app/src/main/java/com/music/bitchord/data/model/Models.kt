@@ -15,11 +15,29 @@ data class Song(
     /** A music-video upload rather than the catalogue track. */
     val isVideo: Boolean = false,
     /**
+     * This track's identity *within one playlist*, which is not its [videoId]:
+     * the same song added twice is two entries with two set-video-ids, and
+     * removing one of them is only expressible in those terms. Present only on
+     * rows parsed from a playlist page, which is the only place a removal can
+     * be asked for from.
+     */
+    val setVideoId: String? = null,
+    /**
      * Queued by AutoPlay or by a station's own mix rather than asked for — the
      * player groups these under the AutoPlay heading and keeps them at the
      * bottom of the queue, below anything the user picked.
      */
     val fromAutoplay: Boolean = false,
+    /**
+     * Explicit content or file URI for local device tracks or downloaded audio.
+     */
+    val localUri: String? = null,
+    /**
+     * Real filesystem path backing [localUri], when MediaStore exposes one.
+     * Lets playback swap a content:// row for a raw file:// path on formats
+     * that need it — see [com.music.bitchord.playback.toMediaItem].
+     */
+    val localPath: String? = null,
 )
 
 /**
@@ -151,6 +169,61 @@ data class ArtistPage(
     val thumbnailUrl: String? = null,
     /** The single artist this page is for, as the header bills them. */
     val name: String? = null,
+)
+
+/**
+ * A track's thumbs rating on the signed-in account.
+ *
+ * [INDIFFERENT] is YouTube's own word for "neither", and is a real state
+ * rather than the absence of one — clearing a like is a request in its own
+ * right (`like/removelike`), not the omission of one.
+ */
+enum class LikeStatus { LIKE, DISLIKE, INDIFFERENT }
+
+/** Who can see a playlist. YouTube's own three values, sent verbatim. */
+enum class PlaylistPrivacy(val label: String, val apiValue: String) {
+    PRIVATE("Private", "PRIVATE"),
+    UNLISTED("Unlisted", "UNLISTED"),
+    PUBLIC("Public", "PUBLIC"),
+}
+
+/**
+ * One of the account's own playlists, as the picker lists them.
+ *
+ * [playlistId] is the raw id (no `VL`), because that is what the edit endpoint
+ * takes; [browseId] is the same playlist addressed as a page. Keeping both
+ * spares every caller from remembering which prefix each side wants.
+ */
+data class UserPlaylist(
+    val playlistId: String,
+    val title: String,
+    val subtitle: String,
+    val thumbnailUrl: String?,
+) {
+    val browseId: String get() = "VL$playlistId"
+}
+
+/**
+ * The per-track state that only YouTube can answer: its rating, and whether it
+ * is in the library.
+ *
+ * Library membership is not addressable by video id — it is toggled with an
+ * opaque feedback token that YouTube mints per row and per direction, so the
+ * tokens have to be fetched before the action can be offered at all. Both
+ * arrive together on the watch queue's own menu, which is why this is one
+ * lookup rather than two.
+ */
+data class SongMenu(
+    /**
+     * The rating YouTube states on this row, or null when the row states
+     * none — which is common, and is *not* the same as INDIFFERENT. A watch
+     * queue frequently renders without a like button at all, and reading that
+     * silence as "not liked" is how a liked song ends up claiming it isn't.
+     */
+    val likeStatus: LikeStatus?,
+    val inLibrary: Boolean,
+    val addToLibraryToken: String?,
+    val removeFromLibraryToken: String?,
 )
 
 sealed interface UiState<out T> {

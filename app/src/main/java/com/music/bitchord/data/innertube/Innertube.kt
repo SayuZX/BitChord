@@ -16,11 +16,16 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
+import com.music.bitchord.data.model.LikeStatus
+import com.music.bitchord.data.model.PlaylistPrivacy
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonArrayBuilder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
@@ -28,6 +33,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import java.io.IOException
 import java.security.MessageDigest
@@ -345,6 +351,152 @@ object Innertube {
         }
     }.status.value
 
+    // ---- Writes -------------------------------------------------------------
+    //
+    // Everything below changes something on the account, so all of it needs
+    // the session cookie [postMusic] already signs with. None of it needs a
+    // new credential or a different client — the same WEB_REMIX identity that
+    // reads the library is the one allowed to edit it.
+
+    /** A write attempted without a session; the caller has a sign-in prompt to show. */
+    class NotSignedInException : IllegalStateException("Sign in to YouTube Music to do that")
+
+    private fun requireSession() {
+        if (cookie == null) throw NotSignedInException()
+    }
+
+    /**
+     * Thumbs up / down / neither, for [videoId].
+     *
+     * The response is inspected rather than discarded. Innertube answers a
+     * refused write with HTTP 200 and an `error` object in the body, so the
+     * status line alone will happily report a rating that never happened.
+     */
+    suspend fun rate(videoId: String, status: LikeStatus) {
+        requireSession()
+        val endpoint = when (status) {
+            LikeStatus.LIKE -> "like/like"
+            LikeStatus.DISLIKE -> "like/dislike"
+            LikeStatus.INDIFFERENT -> "like/removelike"
+        }
+        val response = postMusic(endpoint) {
+            putJsonObject("target") { put("videoId", videoId) }
+        }
+        response["error"]?.let { error ->
+            val message = error.jsonObject["message"]?.jsonPrimitive?.contentOrNull
+            error("YouTube Music refused the rating: ${message ?: error}")
+        }
+        // YouTube states what it did in the toast it would have shown. Worth
+        // keeping: a rating it declines to act on still answers 200, and this
+        // one line is the difference between "the call was made" and "the
+        // call did something".
+        Log.d(TAG, "$endpoint $videoId -> ${findString(response, "text") ?: "no confirmation"}")
+    }
+
+    /**
+     * Adds or removes a track from the library, using a token minted by
+     * YouTube for exactly that transition — see [com.music.bitchord.data.model.SongMenu].
+     * There is no video-id form of this call; the token *is* the request.
+     */
+    suspend fun sendFeedback(token: String) {
+        requireSession()
+        postMusic("feedback") {
+            putJsonArray("feedbackTokens") { add(token) }
+        }
+    }
+
+    /**
+     * Creates a playlist and returns its id.
+     *
+     * [videoIds] seeds it in the same request, which is what "add to a new
+     * playlist" is: one round trip rather than a create followed by an edit
+     * that could half-succeed.
+     */
+    suspend fun createPlaylist(
+        title: String,
+        privacy: PlaylistPrivacy,
+        description: String? = null,
+        videoIds: List<String> = emptyList(),
+    ): String {
+        requireSession()
+        val response = postMusic("playlist/create") {
+            put("title", title)
+            put("description", description.orEmpty())
+            put("privacyStatus", privacy.apiValue)
+            if (videoIds.isNotEmpty()) {
+                putJsonArray("videoIds") { videoIds.forEach { add(it) } }
+            }
+        }
+        // Normally a bare top-level id; occasionally only inside the command
+        // that would navigate the web client to the new page, so fall back to
+        // finding it by name rather than by a path that would rot.
+        return response["playlistId"]?.jsonPrimitive?.contentOrNull
+            ?: findString(response, "playlistId")
+            ?: error("playlist created but no id came back")
+    }
+
+    suspend fun deletePlaylist(playlistId: String) {
+        requireSession()
+        postMusic("playlist/delete") { put("playlistId", playlistId.removePrefix("VL")) }
+    }
+
+    /**
+     * One or more edits to a playlist, applied together.
+     *
+     * The endpoint answers `STATUS_SUCCEEDED` rather than an HTTP error when
+     * it refuses — a playlist the account merely saved rather than owns is
+     * the usual reason — so the body is checked as well as the status line.
+     */
+    private suspend fun editPlaylist(
+        playlistId: String,
+        actions: JsonArrayBuilder.() -> Unit,
+    ) {
+        requireSession()
+        val response = postMusic("browse/edit_playlist") {
+            // The edit endpoint takes the raw id; `VL` is the browse prefix.
+            put("playlistId", playlistId.removePrefix("VL"))
+            putJsonArray("actions", actions)
+        }
+        val status = response["status"]?.jsonPrimitive?.contentOrNull
+        if (status != null && status != "STATUS_SUCCEEDED") {
+            error("YouTube Music refused the edit ($status)")
+        }
+    }
+
+    suspend fun addToPlaylist(playlistId: String, videoIds: List<String>) =
+        editPlaylist(playlistId) {
+            videoIds.forEach { videoId ->
+                addJsonObject {
+                    put("action", "ACTION_ADD_VIDEO")
+                    put("addedVideoId", videoId)
+                }
+            }
+        }
+
+    /**
+     * Removes entries from a playlist. Keyed by set-video-id as well as video
+     * id: the same track added twice is two entries, and only the pair says
+     * which of them to drop.
+     */
+    suspend fun removeFromPlaylist(playlistId: String, entries: List<Pair<String, String>>) =
+        editPlaylist(playlistId) {
+            entries.forEach { (setVideoId, videoId) ->
+                addJsonObject {
+                    put("action", "ACTION_REMOVE_VIDEO")
+                    put("setVideoId", setVideoId)
+                    put("removedVideoId", videoId)
+                }
+            }
+        }
+
+    suspend fun renamePlaylist(playlistId: String, title: String) =
+        editPlaylist(playlistId) {
+            addJsonObject {
+                put("action", "ACTION_SET_PLAYLIST_NAME")
+                put("playlistName", title)
+            }
+        }
+
     /** A fresh client-playback-nonce, identifying one play of one track. */
     fun newCpn(): String = (1..16).map { CPN_ALPHABET.random() }.joinToString("")
 
@@ -460,6 +612,14 @@ object Innertube {
 
     /** Browser-shaped clients are served from the Music host; app clients from YouTube proper. */
     private fun PlayerClient.apiBase(): String = if (usesMusicHost) MUSIC_BASE else YT_BASE
+
+    /** First string value under [key] anywhere in [element], depth-first. */
+    private fun findString(element: JsonElement, key: String): String? = when (element) {
+        is JsonObject -> (element[key] as? JsonPrimitive)?.contentOrNull
+            ?: element.values.firstNotNullOfOrNull { findString(it, key) }
+        is JsonArray -> element.firstNotNullOfOrNull { findString(it, key) }
+        else -> null
+    }
 
     private fun sapisidFrom(cookieHeader: String): String? =
         cookieHeader.split("; ", ";")

@@ -143,9 +143,39 @@ object AudioCache {
     /**
      * Wraps [upstream] so everything played is written to disk on the way
      * through, and anything already there is served without a request.
+     * Local file and content URIs bypass disk caching to prevent redundant writes.
      */
-    fun playbackFactory(upstream: DataSource.Factory): DataSource.Factory =
-        cacheFactory(upstream)
+    fun playbackFactory(upstream: DataSource.Factory): DataSource.Factory = DataSource.Factory {
+        val cacheDs = cacheFactory(upstream).createDataSource()
+        val upstreamDs = upstream.createDataSource()
+        object : DataSource {
+            private var activeDs: DataSource = cacheDs
+
+            override fun addTransferListener(transferListener: androidx.media3.datasource.TransferListener) {
+                cacheDs.addTransferListener(transferListener)
+                upstreamDs.addTransferListener(transferListener)
+            }
+
+            override fun open(dataSpec: DataSpec): Long {
+                val scheme = dataSpec.uri.scheme
+                activeDs = if (scheme == "file" || scheme == "content") {
+                    upstreamDs
+                } else {
+                    cacheDs
+                }
+                return activeDs.open(dataSpec)
+            }
+
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+                activeDs.read(buffer, offset, length)
+
+            override fun getUri(): Uri? = activeDs.uri
+
+            override fun close() {
+                activeDs.close()
+            }
+        }
+    }
 
     private fun cacheFactory(upstream: DataSource.Factory) = CacheDataSource.Factory()
         .setCache(cache)

@@ -256,6 +256,82 @@ object BitChordIcons {
         }.build()
     }
 
+    /**
+     * The player's like control, in two weights.
+     *
+     * Filled rather than merely tinted when set: the player draws every glyph
+     * white on artwork, where a colour change alone is the one signal the
+     * backdrop can swallow. A shape change survives any album cover.
+     */
+    val Heart: ImageVector by lazy { heart("bc_heart", filled = false) }
+
+    val HeartFilled: ImageVector by lazy { heart("bc_heart_filled", filled = true) }
+
+    private fun heart(name: String, filled: Boolean): ImageVector =
+        ImageVector.Builder(
+            name = name,
+            defaultWidth = 24.dp, defaultHeight = 24.dp,
+            viewportWidth = 24f, viewportHeight = 24f,
+        ).apply {
+            path(
+                stroke = stroke,
+                strokeLineWidth = STROKE,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round,
+                fill = if (filled) stroke else null,
+            ) {
+                // Two lobes meeting at the top notch, falling to a single point.
+                moveTo(12f, 20f)
+                curveTo(12f, 20f, 3.2f, 14.6f, 3.2f, 8.9f)
+                arcToRelative(4.5f, 4.5f, 0f, isMoreThanHalf = false, isPositiveArc = true, 8.8f, -1.5f)
+                arcToRelative(4.5f, 4.5f, 0f, isMoreThanHalf = false, isPositiveArc = true, 8.8f, 1.5f)
+                curveTo(20.8f, 14.6f, 12f, 20f, 12f, 20f)
+                close()
+            }
+        }.build()
+
+    /** Adding something — a new playlist, on the library shelf. */
+    val Plus: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "bc_plus",
+            defaultWidth = 24.dp, defaultHeight = 24.dp,
+            viewportWidth = 24f, viewportHeight = 24f,
+        ).apply {
+            path(
+                stroke = stroke,
+                strokeLineWidth = STROKE,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round,
+            ) {
+                moveTo(12f, 5f); lineTo(12f, 19f)
+                moveTo(5f, 12f); lineTo(19f, 12f)
+            }
+        }.build()
+    }
+
+    /** Arrow pointing down into a tray — offline download. */
+    val Download: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "bc_download",
+            defaultWidth = 24.dp, defaultHeight = 24.dp,
+            viewportWidth = 24f, viewportHeight = 24f,
+        ).apply {
+            path(
+                stroke = stroke,
+                strokeLineWidth = STROKE,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round,
+            ) {
+                // Vertical stem
+                moveTo(12f, 4.5f); lineTo(12f, 15.5f)
+                // Arrow head
+                moveTo(7.5f, 11f); lineTo(12f, 15.5f); lineTo(16.5f, 11f)
+                // Tray base
+                moveTo(4.5f, 18f); lineTo(19.5f, 18f)
+            }
+        }.build()
+    }
+
     val Library: ImageVector by lazy {
         ImageVector.Builder(
             name = "bc_library",

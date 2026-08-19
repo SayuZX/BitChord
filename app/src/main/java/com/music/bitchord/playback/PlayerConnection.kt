@@ -1,6 +1,7 @@
 package com.music.bitchord.playback
 
 import android.content.ComponentName
+import android.net.Uri
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -21,6 +22,7 @@ import com.music.bitchord.data.model.NOTIFICATION_ART_PX
 import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.model.artworkAt
 import kotlinx.coroutines.delay
+import java.io.File
 
 /** Snapshot of playback state, driven by the MediaController. */
 data class PlayerState(
@@ -177,9 +179,35 @@ fun MediaController.dropAutoplayTracks() {
  * resolved to (or the video's own audio, as the deliberate fallback when no
  * match was found).
  */
-fun Song.toMediaItem(): MediaItem = MediaItem.Builder()
-    .setMediaId(videoId)
-    .setUri("bitchord://watch?v=$videoId")
+/**
+ * MP4-family containers (m4a/aac/amr/wma/...) store their header or trailing
+ * metadata in a way that needs backward seeking to parse, which the
+ * content:// route (ContentDataSource) doesn't reliably support — the same
+ * bytes read fine as a plain file. Formats like flac/mp3/ogg/webm already
+ * seek correctly through content:// and are left alone.
+ */
+private val DIRECT_FILE_URI_EXTENSIONS = setOf(
+    "m4a", "m4b", "m4p", "mp4", "aac", "3ga", "3gp", "3gpp",
+    "alac", "amr", "awb", "wma", "aif", "aiff", "ac3", "dts",
+)
+
+private fun resolvePlaybackUri(uriString: String, localPath: String?): String {
+    if (localPath.isNullOrBlank() || !uriString.startsWith("content://")) return uriString
+    val ext = localPath.substringAfterLast('.', "").lowercase()
+    if (ext !in DIRECT_FILE_URI_EXTENSIONS) return uriString
+    val file = File(localPath)
+    return if (file.exists() && file.canRead()) Uri.fromFile(file).toString() else uriString
+}
+
+fun Song.toMediaItem(): MediaItem {
+    val uriString = localUri ?: if (videoId.startsWith("content://") || videoId.startsWith("file://")) {
+        videoId
+    } else {
+        "bitchord://watch?v=$videoId"
+    }
+    return MediaItem.Builder()
+        .setMediaId(videoId)
+        .setUri(resolvePlaybackUri(uriString, localPath))
     .setMediaMetadata(
         MediaMetadata.Builder()
             .setTitle(title)
@@ -199,6 +227,7 @@ fun Song.toMediaItem(): MediaItem = MediaItem.Builder()
             .build(),
     )
     .build()
+}
 
 fun MediaController.playSongs(songs: List<Song>, startIndex: Int) {
     if (songs.isEmpty()) return
