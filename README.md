@@ -11,13 +11,16 @@ An unofficial YouTube Music client for Android, built with Jetpack Compose. BitC
 - **Search, browse and play** anything available on YouTube Music — songs, albums, artists, playlists.
 - **Gapless playback with true crossfade**, adjustable 0–12s — two overlapping decoders on an equal-power curve, applied to manual skips as well as track ends, powered by Media3/ExoPlayer.
 - **Sign in with your Google account** — an in-app WebView runs the real `accounts.google.com` login (2FA and passkeys work as normal); only the resulting session cookies are captured, never the credential itself.
+- **Offline downloads** — save tracks to `Downloads/BitChord` with title/artist/album/cover art embedded directly into the file, so they read correctly in a file manager or another player, not just inside BitChord.
+- **Local music library** — anything already on the device (or previously downloaded) is scanned in alongside what streams from YouTube Music.
+- **Scrobbling** to **Last.fm** and **ListenBrainz**, with per-service timing/threshold controls.
 - **Per-network audio quality** — separate quality ceilings for Wi-Fi and mobile data.
 - **Playback speed control** (0.5×–2.0×) and **skip silence**.
-- **Synced lyrics** via LRCLIB.
+- **Synced lyrics** via LRCLIB, with an optional back-gesture to dismiss the lyrics page.
 - **Sleep timer** — fixed presets or "stop after this track".
 - **System equalizer** integration.
 - **"Stats for nerds"** — codec, bitrate and sample rate overlay on the now-playing screen.
-- **Dynamic now-playing background** — a mesh gradient generated from the current artwork's dominant colors.
+- **Dynamic, artwork-driven theming** — a Material palette extracted from the current album art drives the now-playing background and backdrop washes across the app.
 - **Frosted-glass UI** — Telegram-style translucent bars via Haze, Material 3 theming with light/dark/system modes.
 - **Background playback** via a proper foreground media session (lock screen controls, notification, Android media controls).
 
@@ -26,8 +29,9 @@ An unofficial YouTube Music client for Android, built with Jetpack Compose. BitC
 BitChord doesn't use YouTube's official Data API. Instead it:
 
 1. Speaks to the same **Innertube** endpoints the `music.youtube.com` web client uses, via a small Ktor-based client (`data/innertube`).
-2. Resolves playable audio streams with [NewPipeExtractor](https://github.com/TeamNewPipe/NewPipeExtractor), which handles YouTube's signature/`n`-parameter throttling.
+2. Resolves playable audio streams with [NewPipeExtractor](https://github.com/TeamNewPipe/NewPipeExtractor), which handles YouTube's signature/`n`-parameter throttling, falling back across several player clients (including `ANDROID_MUSIC`, which sidesteps `po_token` enforcement) before the extractor is asked.
 3. Authenticates by capturing the session cookies from a real Google login (see [`auth/YtMusicLoginScreen.kt`](app/src/main/java/com/music/bitchord/auth/YtMusicLoginScreen.kt)) rather than reimplementing OAuth.
+4. Tags downloaded tracks itself — `download/Mp4Tagger.kt` and `download/WebmTagger.kt` write ID3/Vorbis-style metadata and cover art directly into the container, with no external tagging library.
 
 ## Tech stack
 
@@ -40,6 +44,8 @@ BitChord doesn't use YouTube's official Data API. Instead it:
 | Images | Coil 3 + Palette |
 | Blur / glass effects | Haze |
 | Auth storage | AndroidX Security (encrypted prefs) |
+| Scrobbling | Last.fm + ListenBrainz, over the existing Ktor client |
+| Downloads / tagging | Hand-rolled MP4/WebM muxers — no external metadata library |
 
 Minimum SDK 26, target/compile SDK 36, Kotlin, portrait-only.
 
@@ -81,7 +87,8 @@ The flavourless `assembleDebug` and `assembleRelease` tasks still work, but each
 ```
 app/src/main/java/com/music/bitchord/
 ├── auth/          Google/YT Music sign-in
-├── data/          Innertube client, models, settings, lyrics
+├── data/          Innertube client, models, settings, lyrics, local media scan, scrobbling
+├── download/       Download queue/service, on-disk store, MP4/WebM metadata tagging
 ├── playback/       Media3 service, queue, crossfade, sleep timer, cache
 └── ui/            Screens (home, search, library, player), theming, components
 ```
