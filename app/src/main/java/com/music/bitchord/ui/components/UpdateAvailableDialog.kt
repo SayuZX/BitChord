@@ -33,16 +33,16 @@ import dev.chrisbanes.haze.materials.ExperimentalHazeMaterialsApi
 import dev.chrisbanes.haze.materials.HazeMaterials
 
 /** UIAlertController's own metrics: fixed narrow width, 14pt corner, 44pt rows. */
-private val ALERT_WIDTH = 270.dp
-private val ALERT_CORNER = 14.dp
-private val ACTION_HEIGHT = 44.dp
+internal val ALERT_WIDTH = 270.dp
+internal val ALERT_CORNER = 14.dp
+internal val ACTION_HEIGHT = 44.dp
 
 /**
  * The dim behind the alert. Flat on purpose — the glass is the card, and
  * blurring the wallpaper *behind* it too leaves nothing for the card to be
  * frosted against, which is what made this read as a grey box before.
  */
-private val SCRIM_COLOR = Color.Black.copy(alpha = 0.28f)
+internal val SCRIM_COLOR = Color.Black.copy(alpha = 0.28f)
 
 /**
  * Once-per-launch nudge that a newer build is on GitHub Releases — the top
@@ -144,10 +144,11 @@ fun UpdateAvailableDialog(
  * whole point is that neither choice is a trap.
  */
 @Composable
-private fun AlertAction(
+internal fun AlertAction(
     label: String,
     emphasised: Boolean,
     onClick: () -> Unit,
+    enabled: Boolean = true,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
@@ -160,6 +161,7 @@ private fun AlertAction(
                 if (pressed) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.09f) else Color.Transparent,
             )
             .clickable(
+                enabled = enabled,
                 indication = null,
                 interactionSource = interactionSource,
                 onClick = onClick,
@@ -172,14 +174,14 @@ private fun AlertAction(
                 fontSize = 17.sp,
                 fontWeight = if (emphasised) FontWeight.W600 else FontWeight.W400,
             ),
-            color = MaterialTheme.colorScheme.primary,
+            color = MaterialTheme.colorScheme.primary.copy(alpha = if (enabled) 1f else 0.4f),
         )
     }
 }
 
 /** Hairline separator — [HorizontalDivider][androidx.compose.material3.HorizontalDivider]'s 1dp reads as a bar at this scale. */
 @Composable
-private fun AlertRule() {
+internal fun AlertRule() {
     Box(
         Modifier
             .fillMaxWidth()

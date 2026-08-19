@@ -28,8 +28,8 @@ android {
         // Haze falls back to a translucent scrim below that.
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -136,7 +136,12 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     // ---- Stream resolution: NewPipe solves YouTube's signature + `n` throttling ----
-    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.4")
+    // Pinned to v0.26.3, not the newer v0.26.4: v0.26.4's player-JS parser fails with
+    // "Could not parse deobfuscation function" on the current player build, which blocks
+    // WEB_REMIX's ciphered formats entirely. v0.26.3 solves the same signatures cleanly
+    // against the same player JS — confirmed side by side against PixelMusic-ref, which
+    // pins v0.26.3 and doesn't hit the parse failure.
+    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.3")
 
     // ---- Auth/session storage ----
     implementation("androidx.security:security-crypto:1.1.0-alpha06")

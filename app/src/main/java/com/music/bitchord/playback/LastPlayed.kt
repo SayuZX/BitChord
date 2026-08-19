@@ -37,7 +37,15 @@ object LastPlayed {
         val window = songs.subList(start, minOf(songs.size, start + MAX_TRACKS))
         val stored = StoredQueue(
             tracks = window.map {
-                StoredTrack(it.videoId, it.title, it.artist, it.thumbnailUrl, it.fromAutoplay)
+                StoredTrack(
+                    it.videoId,
+                    it.title,
+                    it.artist,
+                    it.thumbnailUrl,
+                    it.fromAutoplay,
+                    it.localUri,
+                    it.localPath,
+                )
             },
             index = (index - start).coerceIn(0, window.lastIndex),
             positionMs = positionMs.coerceAtLeast(0L),
@@ -56,7 +64,15 @@ object LastPlayed {
         if (stored.tracks.isEmpty()) return null
         return Snapshot(
             songs = stored.tracks.map {
-                Song(it.id, it.title, it.artist, it.artwork, fromAutoplay = it.auto)
+                Song(
+                    it.id,
+                    it.title,
+                    it.artist,
+                    it.artwork,
+                    fromAutoplay = it.auto,
+                    localUri = it.local,
+                    localPath = it.path,
+                )
             },
             index = stored.index.coerceIn(0, stored.tracks.lastIndex),
             positionMs = stored.positionMs.coerceAtLeast(0L),
@@ -71,6 +87,15 @@ object LastPlayed {
         val artwork: String? = null,
         /** Whether AutoPlay queued it — the queue's sections outlive a restart. */
         val auto: Boolean = false,
+        /**
+         * Where it plays from on disk, when that is anywhere. Not a detail the
+         * player needs to resume — [id] alone finds the file again either way —
+         * but it is what the UI reads to tell a track off the device from one
+         * off YouTube, and a restored queue that dropped it had the player's
+         * menu offering to rate, download and share a local file.
+         */
+        val local: String? = null,
+        val path: String? = null,
     )
 
     @Serializable

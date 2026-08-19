@@ -30,6 +30,7 @@ import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -133,9 +134,12 @@ fun LazyListScope.songListSkeleton(
     count: Int = 8,
     keyPrefix: String = "skeleton:song",
     circular: Boolean = false,
+    alpha: Float = 1f,
 ) {
     items(count, key = { "$keyPrefix:$it" }) { index ->
-        SongRowSkeleton(index = index, circular = circular)
+        Box(Modifier.graphicsLayer { this.alpha = alpha }) {
+            SongRowSkeleton(index = index, circular = circular)
+        }
     }
 }
 
@@ -213,18 +217,19 @@ fun LazyListScope.librarySkeleton() {
 
 /** The Play / Shuffle pair, which only appears once there is something to play. */
 @Composable
-private fun DetailActionsSkeleton() {
+private fun DetailActionsSkeleton(isArtist: Boolean) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = PAGE_GUTTER, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+            // Matches the real pair's inset, height and corner, so the header
+            // above them doesn't shift when the track list lands.
+            .padding(horizontal = PAGE_GUTTER + 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
     ) {
-        repeat(2) {
-            ShimmerBox(
-                modifier = Modifier.weight(1f).height(40.dp),
-                shape = RoundedCornerShape(percent = 50),
-            )
+        ShimmerBox(Modifier.size(50.dp), CircleShape)
+        ShimmerBox(Modifier.width(130.dp).height(50.dp), CircleShape)
+        if (!isArtist) {
+            ShimmerBox(Modifier.size(50.dp), CircleShape)
         }
     }
 }
@@ -235,8 +240,14 @@ private fun DetailActionsSkeleton() {
  */
 fun LazyListScope.detailSkeleton(isArtist: Boolean) {
     if (isArtist) {
+        item(key = "skeleton:detail:actions") {
+            Column(Modifier.graphicsLayer { alpha = 0.4f }) {
+                DetailActionsSkeleton(isArtist = true)
+                Spacer(Modifier.height(22.dp))
+            }
+        }
         item(key = "skeleton:detail:top") {
-            Column {
+            Column(Modifier.graphicsLayer { alpha = 0.4f }) {
                 SectionHeaderSkeleton()
                 // Top songs page four at a time, in columns 88% of the width.
                 LazyRow(
@@ -253,17 +264,19 @@ fun LazyListScope.detailSkeleton(isArtist: Boolean) {
             }
         }
         item(key = "skeleton:detail:sections") {
-            ShelfSkeleton(index = 2, cardCorner = 10.dp)
+            Box(Modifier.graphicsLayer { alpha = 0.4f }) {
+                ShelfSkeleton(index = 2, cardCorner = 10.dp)
+            }
         }
         return
     }
     item(key = "skeleton:detail:actions") {
-        Column {
-            DetailActionsSkeleton()
-            Spacer(Modifier.height(10.dp))
+        Column(Modifier.graphicsLayer { alpha = 0.4f }) {
+            DetailActionsSkeleton(isArtist = false)
+            Spacer(Modifier.height(20.dp))
         }
     }
-    songListSkeleton(count = 8, keyPrefix = "skeleton:detail:song")
+    songListSkeleton(count = 8, keyPrefix = "skeleton:detail:song", alpha = 0.4f)
 }
 
 /** The tighter row used inside the artist page's top-songs pager. */

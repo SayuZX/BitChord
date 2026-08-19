@@ -76,24 +76,24 @@ data class PlayerClient(
          * The version is the whole ballgame. Anything Google considers stale is
          * refused with an HTTP 400 before playability is looked at, which is
          * not a "try the next format" failure but a "this identity is dead"
-         * one. 19.29.1 is already past that line; these two are not.
+         * one. These are current as of July 2026.
          */
         val IOS = PlayerClient(
             clientName = "IOS",
-            clientVersion = "20.03.02",
+            clientVersion = "21.26.4",
             clientId = "5",
-            userAgent = "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)",
+            userAgent = "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
             osName = "iPhone",
-            osVersion = "18.2.1.22C161",
+            osVersion = "18.3.2.22D82",
             deviceMake = "Apple",
             deviceModel = "iPhone16,2",
         )
 
         /** A newer build of the same app: refused on a different schedule. */
         val IOS_RECENT = IOS.copy(
-            clientVersion = "20.10.4",
-            userAgent = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
-            osVersion = "18.3.2.22D82",
+            clientVersion = "21.29.1",
+            userAgent = "com.google.ios.youtube/21.29.1 (iPhone16,2; U; CPU iOS 18_5 like Mac OS X;)",
+            osVersion = "18.5.22F70",
         )
 
         /**
@@ -104,9 +104,9 @@ data class PlayerClient(
          */
         val ANDROID = PlayerClient(
             clientName = "ANDROID",
-            clientVersion = "21.10.38",
+            clientVersion = "21.26.364",
             clientId = "3",
-            userAgent = "com.google.android.youtube/21.10.38 " +
+            userAgent = "com.google.android.youtube/21.26.364 " +
                 "(Linux; U; Android 15; en_US; Pixel 9 Pro; Build/AP4A.250205.002; Cronet/132.0.6834.79) gzip",
             osName = "Android",
             osVersion = "15",
@@ -114,6 +114,25 @@ data class PlayerClient(
             deviceModel = "Pixel 9 Pro",
             androidSdkVersion = "35",
             needsSignatureTimestamp = true,
+        )
+
+        /**
+         * YouTube Music Android app. Returns plain URLs without ciphering.
+         * As of mid-2026, this client is not subject to the po_token
+         * enforcement that blocks stream fetches from other clients —
+         * the only known client that still serves HTTPS streams freely.
+         */
+        val ANDROID_MUSIC = PlayerClient(
+            clientName = "ANDROID_MUSIC",
+            clientVersion = "8.39.42",
+            clientId = "21",
+            userAgent = "com.google.android.apps.youtube.music/8.39.42 " +
+                "(Linux; U; Android 15; en_US; Pixel 9 Pro; Build/AP4A.250205.002) gzip",
+            osName = "Android",
+            osVersion = "15",
+            deviceMake = "Google",
+            deviceModel = "Pixel 9 Pro",
+            androidSdkVersion = "35",
         )
 
         /**
@@ -128,15 +147,18 @@ data class PlayerClient(
          * hard-used address with `LOGIN_REQUIRED` / "Sign in to confirm you're
          * not a bot". A check run from anywhere but the device is measuring
          * the wrong thing.
+         *
+         * Version MUST be ≤1.65.10 — versions >1.65 trigger SABR-only
+         * streaming (no HTTPS URLs returned).
          */
         val ANDROID_VR = PlayerClient(
             clientName = "ANDROID_VR",
-            clientVersion = "1.61.48",
+            clientVersion = "1.65.10",
             clientId = "28",
-            userAgent = "com.google.android.apps.youtube.vr.oculus/1.61.48 " +
-                "(Linux; U; Android 12; en_US; Quest 3; Build/SQ3A.220605.009.A1; Cronet/132.0.6808.3)",
+            userAgent = "com.google.android.apps.youtube.vr.oculus/1.65.10 " +
+                "(Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
             osName = "Android",
-            osVersion = "12",
+            osVersion = "12L",
             deviceMake = "Oculus",
             deviceModel = "Quest 3",
             androidSdkVersion = "32",
@@ -149,32 +171,54 @@ data class PlayerClient(
                 "(Linux; U; Android 12; en_US; Quest 3; Build/SQ3A.220605.009.A1; Cronet/107.0.5284.2)",
         )
 
-        /** Last resort: the web player itself. Always ciphered, and usually refused. */
+        /**
+         * Identities we never mint with, but may still have to fetch for:
+         * [forStreamUrl] dresses a URL however that URL says it was made, and
+         * the extraction failsafe picks its own client without asking.
+         *
+         * [WEB_REMIX] sits here rather than in [StreamResolver]'s walk on
+         * purpose. As a source of streams it earned its keep only in theory:
+         * every format it returns is ciphered, so reaching it costs a download
+         * of YouTube's player JavaScript and a signature to solve, and after
+         * all that it is refused far more often than not. What it did reliably
+         * do was sit at the end of the list absorbing the time budget of tracks
+         * that were already failing. The failsafe below is the better last
+         * resort. Kept here so a URL minted elsewhere that names it can still
+         * be dressed correctly.
+         */
+        /**
+         * The browser identity music.youtube.com itself runs as. Not part of
+         * [StreamResolver]'s anonymous walk — sent bare, it is ciphered and
+         * refused about as often as it works. Worth reaching for on its own,
+         * ahead of anything else, when there is a signed-in session to send
+         * with it: a session cookie is what a browser-shaped client is
+         * supposed to carry, and Google answers a plausible one very
+         * differently to a device client with none at all.
+         */
         val WEB_REMIX = PlayerClient(
             clientName = "WEB_REMIX",
-            clientVersion = "1.20260114.01.00",
+            clientVersion = "1.20260707.12.00",
             clientId = "67",
             userAgent = WEB_USER_AGENT,
             origin = MUSIC_ORIGIN,
             needsSignatureTimestamp = true,
         )
 
-        /**
-         * Identities we never mint with, but may still have to fetch for:
-         * [forStreamUrl] dresses a URL however that URL says it was made, and
-         * the extraction failsafe picks its own client without asking.
-         */
         private val WEB = PlayerClient(
             clientName = "WEB",
-            clientVersion = "2.20260114.00.00",
+            clientVersion = "2.20260708.00.00",
             clientId = "1",
             userAgent = WEB_USER_AGENT,
             origin = YOUTUBE_ORIGIN,
         )
 
-        private val TVHTML5 = PlayerClient(
+        /**
+         * TV Cobalt v7 — the most reliable client for flagged IPs. No PO Token
+         * needed, no login required. Uses cookie-based auth when available.
+         */
+        val TVHTML5 = PlayerClient(
             clientName = "TVHTML5",
-            clientVersion = "7.20260114.00.00",
+            clientVersion = "7.20260707.07.00",
             clientId = "7",
             userAgent = "Mozilla/5.0(SMART-TV; Linux; Tizen 4.0.0.2) AppleWebkit/605.1.15 " +
                 "(KHTML, like Gecko) SamsungBrowser/9.2 TV Safari/605.1.15",
@@ -199,6 +243,7 @@ data class PlayerClient(
                     if (version == IOS_RECENT.clientVersion) IOS_RECENT else IOS
                 name == "ANDROID_VR" ->
                     if (version == ANDROID_VR_LEGACY.clientVersion) ANDROID_VR_LEGACY else ANDROID_VR
+                name == "ANDROID_MUSIC" -> ANDROID_MUSIC
                 name.startsWith("ANDROID") -> ANDROID
                 name.startsWith("TVHTML5") -> TVHTML5
                 name == "WEB_REMIX" -> WEB_REMIX

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -33,6 +34,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,6 +44,8 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import coil3.compose.AsyncImage
 import com.music.bitchord.data.model.BrowseItem
 import com.music.bitchord.data.model.BrowseType
@@ -54,6 +59,7 @@ import com.music.bitchord.ui.components.MessageState
 import com.music.bitchord.ui.components.PAGE_GUTTER
 import com.music.bitchord.ui.components.ROW_DIVIDER_INSET
 import com.music.bitchord.ui.components.SongRow
+import com.music.bitchord.ui.components.thumbnailBorder
 import com.music.bitchord.ui.components.songListSkeleton
 
 @Composable
@@ -64,6 +70,7 @@ fun SearchScreen(
     onFilterChange: (SearchFilter) -> Unit,
     results: UiState<List<SearchResult>>?,
     listState: LazyListState,
+    focusTrigger: Int = 0,
     onSongClick: (List<Song>, Int) -> Unit,
     onSongLongPress: (Song) -> Unit,
     onSongSwipe: (Song) -> Unit,
@@ -76,6 +83,12 @@ fun SearchScreen(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues,
 ) {
+    val focusRequester = remember { FocusRequester() }
+    // Re-tapping the search tab from the nav bar increments focusTrigger;
+    // respond by focusing the field and opening the keyboard.
+    LaunchedEffect(focusTrigger) {
+        if (focusTrigger > 0) focusRequester.requestFocus()
+    }
     LazyColumn(
         state = listState,
         modifier = modifier.fillMaxSize(),
@@ -86,7 +99,8 @@ fun SearchScreen(
                 query = query,
                 onQueryChange = onQueryChange,
                 onSubmit = onSubmit,
-                modifier = Modifier.padding(horizontal = PAGE_GUTTER, vertical = 8.dp),
+                focusRequester = focusRequester,
+                modifier = Modifier.padding(start = PAGE_GUTTER, end = PAGE_GUTTER, bottom = 8.dp),
             )
         }
         // The filters only mean something once there is a result set to narrow;
@@ -250,8 +264,11 @@ private fun BrowseRow(item: BrowseItem, onClick: () -> Unit) {
             contentDescription = null,
             modifier = Modifier
                 .size(52.dp)
-                // Artists read as circles, releases as rounded squares.
                 .clip(
+                    if (item.type == BrowseType.ARTIST) CircleShape
+                    else RoundedCornerShape(8.dp),
+                )
+                .thumbnailBorder(
                     if (item.type == BrowseType.ARTIST) CircleShape
                     else RoundedCornerShape(8.dp),
                 )
@@ -310,14 +327,17 @@ private fun SearchField(
     query: String,
     onQueryChange: (String) -> Unit,
     onSubmit: () -> Unit,
+    focusRequester: FocusRequester = remember { FocusRequester() },
     modifier: Modifier = Modifier,
 ) {
     val focusManager = LocalFocusManager.current
     Row(
         modifier = modifier
             .fillMaxWidth()
+            // Fixed height prevents the row from growing when text is entered
+            .height(46.dp)
             .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(11.dp))
-            .padding(horizontal = 12.dp, vertical = 11.dp),
+            .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
@@ -350,7 +370,9 @@ private fun SearchField(
                         focusManager.clearFocus()
                     },
                 ),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
             )
         }
         // Emptying the field is also how the recent searches are got back to,

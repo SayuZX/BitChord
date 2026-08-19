@@ -8,8 +8,10 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,13 +20,20 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -32,26 +41,23 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.music.bitchord.data.settings.AppSettings
+import kotlin.math.roundToInt
 
 data class BottomTab(
     val label: String,
     val icon: ImageVector,
 )
 
-/**
- * Floating translucent pill navigation, Telegram-flavoured:
- * thick-stroke icons and a springy (slightly overshooting) scale +
- * tinted-capsule selection animation.
- *
- * No blur of its own: the bottom fade blur it floats on is at full strength by
- * the time it reaches this far down, so the pill only needs the tint half of
- * that recipe. The alphas below are the ones [HazeMaterials.thin] applies, so
- * the body still matches the mini player sitting above it.
- */
 @Composable
 fun FloatingBottomBar(
     tabs: List<BottomTab>,
@@ -59,39 +65,130 @@ fun FloatingBottomBar(
     onTabSelected: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // Fully rounded ends, whatever the bar's height works out to.
     val pillShape = RoundedCornerShape(percent = 50)
     val container = MaterialTheme.colorScheme.surface
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
-    // With the frosted floor beneath it gone, the pill needs a solid fill of
-    // its own instead of a tint meant to sit on top of that blur.
     val glass = if (reduceDynamicBlur) {
         container
     } else {
         container.copy(alpha = if (container.luminance() >= 0.5f) 0.6f else 0.65f)
     }
-    Row(
+
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    val haptics = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val currentSelectedIndex by rememberUpdatedState(selectedIndex)
+
+    var rowSize by remember { mutableStateOf(IntSize.Zero) }
+    val gapPx = with(density) { 6.dp.toPx() }
+    val n = tabs.size
+
+    // With weight(1f) + spacedBy(gap):
+    //   tabWidth = (rowWidth - gap*(n-1)) / n
+    //   tab i left edge = i * (tabWidth + gap) = i * (rowWidth + gap) / n
+    val tabWidthPx = if (rowSize.width > 0 && n > 0) {
+        (rowSize.width - gapPx * (n - 1)) / n
+    } else 0f
+    val tabStepPx = if (rowSize.width > 0 && n > 0) {
+        (rowSize.width + gapPx) / n
+    } else 0f
+
+    val pillTargetPx = if (tabStepPx > 0f) {
+        selectedIndex * tabStepPx + dragOffset
+    } else 0f
+
+    val animatedPillOffset by animateFloatAsState(
+        targetValue = pillTargetPx,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "pillOffset",
+    )
+
+    var lastHapticTab by remember { mutableIntStateOf(selectedIndex) }
+
+    LaunchedEffect(selectedIndex) { dragOffset = 0f }
+
+    Box(
         modifier = modifier
             .navigationBarsPadding()
             .padding(horizontal = PAGE_GUTTER)
-            // Sits close to the gesture bar, Apple-style.
             .padding(bottom = 2.dp)
             .fillMaxWidth()
             .clip(pillShape)
             .background(glass)
             .border(0.5.dp, Color.White.copy(alpha = 0.10f), pillShape)
             .padding(horizontal = 8.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Equal weights: the gaps stay even however wide the screen is.
-        tabs.forEachIndexed { index, tab ->
-            BottomBarItem(
-                tab = tab,
-                selected = index == selectedIndex,
-                onClick = { onTabSelected(index) },
-                modifier = Modifier.weight(1f),
+        if (tabWidthPx > 0f) {
+            Box(
+                modifier = Modifier
+                    .width(with(density) { tabWidthPx.toDp() })
+                    .height(with(density) { rowSize.height.toDp() })
+                    .graphicsLayer { translationX = animatedPillOffset }
+                    .clip(pillShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
             )
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .onSizeChanged { rowSize = it }
+                .pointerInput(Unit) {
+                    var totalDrag = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = { totalDrag = 0f },
+                        onDragCancel = { dragOffset = 0f },
+                        onDragEnd = {
+                            if (tabStepPx > 0f) {
+                                val ratio = totalDrag / tabStepPx
+                                val shift = when {
+                                    ratio > 0.35f -> kotlin.math.max(1, ratio.roundToInt())
+                                    ratio < -0.35f -> kotlin.math.min(-1, ratio.roundToInt())
+                                    else -> 0
+                                }
+                                val newIndex = (currentSelectedIndex + shift).coerceIn(0, tabs.lastIndex)
+                                if (newIndex != currentSelectedIndex) {
+                                    onTabSelected(newIndex)
+                                }
+                            }
+                            dragOffset = 0f
+                        },
+                        onHorizontalDrag = { _, delta ->
+                            totalDrag += delta
+                            val rawPx = when {
+                                totalDrag > 0 && currentSelectedIndex == tabs.lastIndex ->
+                                    totalDrag * 0.25f
+                                totalDrag < 0 && currentSelectedIndex == 0 ->
+                                    totalDrag * 0.25f
+                                else -> totalDrag
+                            }
+                            dragOffset = rawPx
+
+                            val approxTab =
+                                (currentSelectedIndex + dragOffset / tabStepPx)
+                                    .coerceIn(0f, tabs.lastIndex.toFloat())
+                                    .roundToInt()
+                            if (approxTab != lastHapticTab) {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                lastHapticTab = approxTab
+                            }
+                        },
+                    )
+                },
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            tabs.forEachIndexed { index, tab ->
+                BottomBarItem(
+                    tab = tab,
+                    selected = index == selectedIndex,
+                    onClick = { onTabSelected(index) },
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
     }
 }
@@ -120,31 +217,22 @@ private fun BottomBarItem(
         animationSpec = tween(200),
         label = "tabTint",
     )
-    val capsuleAlpha by animateFloatAsState(
-        targetValue = if (selected) 0.14f else 0f,
-        animationSpec = tween(200),
-        label = "tabCapsule",
-    )
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier
-            // Matches the bar's own ends rather than a softened rectangle.
             .clip(RoundedCornerShape(percent = 50))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = onClick,
             )
-            .background(MaterialTheme.colorScheme.primary.copy(alpha = capsuleAlpha))
             .padding(vertical = 7.dp),
     ) {
         Icon(
             imageVector = tab.icon,
             contentDescription = tab.label,
             tint = tint,
-            // Scale the glyph, not the capsule — a growing capsule would
-            // crowd its neighbours now that the slots are fixed widths.
             modifier = Modifier
                 .size(25.dp)
                 .graphicsLayer {

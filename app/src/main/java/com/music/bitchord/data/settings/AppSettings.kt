@@ -65,7 +65,7 @@ object AppSettings {
      */
     val spatialAudio = MutableStateFlow(false)
     val playbackSpeed = MutableStateFlow(1.0f)
-    val themeMode = MutableStateFlow(ThemeMode.SYSTEM)
+    val themeMode = MutableStateFlow(ThemeMode.DARK)
 
     /** Keep playing similar music once the queue runs out. */
     val autoplay = MutableStateFlow(true)
@@ -81,6 +81,22 @@ object AppSettings {
 
     /** Disk budget for cached audio. [AudioCache][com.music.bitchord.playback.AudioCache] evicts past it. */
     val audioCacheLimitBytes = MutableStateFlow(DEFAULT_CACHE_LIMIT_BYTES)
+
+    // ── Scrobbling ──────────────────────────────────────────────────────
+
+    val lastfmEnabled = MutableStateFlow(false)
+    val lastfmUsername = MutableStateFlow("")
+    val lastfmSessionKey = MutableStateFlow("")
+    val lastfmApiKey = MutableStateFlow("")
+    val lastfmSecret = MutableStateFlow("")
+    val lastfmEndpoint = MutableStateFlow("")
+    val lastfmScrobbleEnabled = MutableStateFlow(false)
+    val lastfmNowPlaying = MutableStateFlow(false)
+    val scrobbleMinDuration = MutableStateFlow(30)
+    val scrobbleDelayPercent = MutableStateFlow(0.5f)
+    val scrobbleDelaySeconds = MutableStateFlow(180)
+    val listenBrainzEnabled = MutableStateFlow(false)
+    val listenBrainzToken = MutableStateFlow("")
 
     /** Published by PlaybackService so the UI can open the system equalizer. */
     val audioSessionId = MutableStateFlow(0)
@@ -103,14 +119,27 @@ object AppSettings {
         spatialAudio.value = prefs.getBoolean(KEY_SPATIAL_AUDIO, false)
         playbackSpeed.value = prefs.getFloat(KEY_SPEED, 1.0f)
         themeMode.value = runCatching {
-            ThemeMode.valueOf(prefs.getString(KEY_THEME, null) ?: "SYSTEM")
-        }.getOrDefault(ThemeMode.SYSTEM)
+            ThemeMode.valueOf(prefs.getString(KEY_THEME, null) ?: "DARK")
+        }.getOrDefault(ThemeMode.DARK)
         autoplay.value = prefs.getBoolean(KEY_AUTOPLAY, true)
         showNerdStats.value = prefs.getBoolean(KEY_NERD_STATS, false)
         reduceAnimation.value = prefs.getBoolean(KEY_REDUCE_ANIMATION, false)
         reduceDynamicBlur.value = prefs.getBoolean(KEY_REDUCE_BLUR, false)
         audioCacheLimitBytes.value = prefs.getLong(KEY_CACHE_LIMIT, DEFAULT_CACHE_LIMIT_BYTES)
             .coerceIn(DEFAULT_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES)
+        lastfmEnabled.value = prefs.getBoolean(KEY_LASTFM_ENABLED, false)
+        lastfmUsername.value = prefs.getString(KEY_LASTFM_USERNAME, "").orEmpty()
+        lastfmSessionKey.value = prefs.getString(KEY_LASTFM_SESSION_KEY, "").orEmpty()
+        lastfmApiKey.value = prefs.getString(KEY_LASTFM_API_KEY, "").orEmpty()
+        lastfmSecret.value = prefs.getString(KEY_LASTFM_SECRET, "").orEmpty()
+        lastfmEndpoint.value = prefs.getString(KEY_LASTFM_ENDPOINT, "").orEmpty()
+        lastfmScrobbleEnabled.value = prefs.getBoolean(KEY_LASTFM_SCROBBLE_ENABLED, false)
+        lastfmNowPlaying.value = prefs.getBoolean(KEY_LASTFM_NOW_PLAYING, false)
+        scrobbleMinDuration.value = prefs.getInt(KEY_SCROBBLE_MIN_DURATION, 30)
+        scrobbleDelayPercent.value = prefs.getFloat(KEY_SCROBBLE_DELAY_PERCENT, 0.5f)
+        scrobbleDelaySeconds.value = prefs.getInt(KEY_SCROBBLE_DELAY_SECONDS, 180)
+        listenBrainzEnabled.value = prefs.getBoolean(KEY_LISTENBRAINZ_ENABLED, false)
+        listenBrainzToken.value = prefs.getString(KEY_LISTENBRAINZ_TOKEN, "").orEmpty()
         watchConnection(context)
     }
 
@@ -223,6 +252,71 @@ object AppSettings {
         prefs.edit().putLong(KEY_CACHE_LIMIT, clamped).apply()
     }
 
+    fun setLastfmEnabled(value: Boolean) {
+        lastfmEnabled.value = value
+        prefs.edit().putBoolean(KEY_LASTFM_ENABLED, value).apply()
+    }
+
+    fun setLastfmUsername(value: String) {
+        lastfmUsername.value = value
+        prefs.edit().putString(KEY_LASTFM_USERNAME, value).apply()
+    }
+
+    fun setLastfmSessionKey(value: String) {
+        lastfmSessionKey.value = value
+        prefs.edit().putString(KEY_LASTFM_SESSION_KEY, value).apply()
+    }
+
+    fun setLastfmApiKey(value: String) {
+        lastfmApiKey.value = value
+        prefs.edit().putString(KEY_LASTFM_API_KEY, value).apply()
+    }
+
+    fun setLastfmSecret(value: String) {
+        lastfmSecret.value = value
+        prefs.edit().putString(KEY_LASTFM_SECRET, value).apply()
+    }
+
+    fun setLastfmEndpoint(value: String) {
+        lastfmEndpoint.value = value
+        prefs.edit().putString(KEY_LASTFM_ENDPOINT, value).apply()
+    }
+
+    fun setLastfmScrobbleEnabled(value: Boolean) {
+        lastfmScrobbleEnabled.value = value
+        prefs.edit().putBoolean(KEY_LASTFM_SCROBBLE_ENABLED, value).apply()
+    }
+
+    fun setLastfmNowPlaying(value: Boolean) {
+        lastfmNowPlaying.value = value
+        prefs.edit().putBoolean(KEY_LASTFM_NOW_PLAYING, value).apply()
+    }
+
+    fun setScrobbleMinDuration(value: Int) {
+        scrobbleMinDuration.value = value
+        prefs.edit().putInt(KEY_SCROBBLE_MIN_DURATION, value).apply()
+    }
+
+    fun setScrobbleDelayPercent(value: Float) {
+        scrobbleDelayPercent.value = value
+        prefs.edit().putFloat(KEY_SCROBBLE_DELAY_PERCENT, value).apply()
+    }
+
+    fun setScrobbleDelaySeconds(value: Int) {
+        scrobbleDelaySeconds.value = value
+        prefs.edit().putInt(KEY_SCROBBLE_DELAY_SECONDS, value).apply()
+    }
+
+    fun setListenBrainzEnabled(value: Boolean) {
+        listenBrainzEnabled.value = value
+        prefs.edit().putBoolean(KEY_LISTENBRAINZ_ENABLED, value).apply()
+    }
+
+    fun setListenBrainzToken(value: String) {
+        listenBrainzToken.value = value
+        prefs.edit().putString(KEY_LISTENBRAINZ_TOKEN, value).apply()
+    }
+
     const val DEFAULT_CACHE_LIMIT_BYTES = 512L * 1024 * 1024
     const val MAX_CACHE_LIMIT_BYTES = 10L * 1024 * 1024 * 1024
 
@@ -239,4 +333,18 @@ object AppSettings {
     private const val KEY_CACHE_LIMIT = "audio_cache_limit_bytes"
     private const val KEY_REDUCE_ANIMATION = "reduce_animation"
     private const val KEY_REDUCE_BLUR = "reduce_dynamic_blur"
+
+    private const val KEY_LASTFM_ENABLED = "lastfm_enabled"
+    private const val KEY_LASTFM_USERNAME = "lastfm_username"
+    private const val KEY_LASTFM_SESSION_KEY = "lastfm_session_key"
+    private const val KEY_LASTFM_API_KEY = "lastfm_api_key"
+    private const val KEY_LASTFM_SECRET = "lastfm_secret"
+    private const val KEY_LASTFM_ENDPOINT = "lastfm_endpoint"
+    private const val KEY_LASTFM_SCROBBLE_ENABLED = "lastfm_scrobble_enabled"
+    private const val KEY_LASTFM_NOW_PLAYING = "lastfm_now_playing"
+    private const val KEY_SCROBBLE_MIN_DURATION = "scrobble_min_duration"
+    private const val KEY_SCROBBLE_DELAY_PERCENT = "scrobble_delay_percent"
+    private const val KEY_SCROBBLE_DELAY_SECONDS = "scrobble_delay_seconds"
+    private const val KEY_LISTENBRAINZ_ENABLED = "listenbrainz_enabled"
+    private const val KEY_LISTENBRAINZ_TOKEN = "listenbrainz_token"
 }

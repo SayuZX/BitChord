@@ -2,6 +2,7 @@ package com.music.bitchord.playback
 
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
@@ -95,6 +96,32 @@ object AudioCache {
     /** Enough to cover a hand-over, not enough to keep chasing a lost race. */
     private const val MAX_ATTEMPTS = 4
 
+    /**
+     * How many tracks past the immediate next one get their stream URL warmed
+     * ahead of time. Only the very next track is worth spending bytes on — see
+     * [prefetchQueue] — but resolving a URL costs a handful of small round
+     * trips, not a stream's worth of data, so paying that cost several tracks
+     * early is worth it purely to keep a fast run of skips from ever landing
+     * on a track that has to resolve cold.
+     *
+     * One, not three, and the difference is not the round trips. While every
+     * player client is being refused, *every* warm-up falls through to NewPipe
+     * extraction — the one step in this app that does not share out when it is
+     * run concurrently, but collapses: 1.8s alone against 30.3s with three in
+     * flight. Warming three tracks ahead therefore did not cost three cheap
+     * resolves in the background, it cost the track the listener was waiting on
+     * a thirty-second start. See
+     * [StreamResolver][com.music.bitchord.data.innertube.StreamResolver]'s
+     * extraction gate, which serialises what is left of that.
+     */
+    private const val QUEUE_LOOKAHEAD = 1
+
+    /** Spacing between queued resolves, so warming the queue never competes with the track actually playing. */
+    private const val QUEUE_RESOLVE_STAGGER_MS = 500L
+
+    /** How many upcoming tracks are worth gathering for [prefetchQueue] — the caller doesn't need to know why. */
+    const val QUEUE_DEPTH = QUEUE_LOOKAHEAD + 1
+
     private lateinit var cache: SimpleCache
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -143,9 +170,39 @@ object AudioCache {
     /**
      * Wraps [upstream] so everything played is written to disk on the way
      * through, and anything already there is served without a request.
+     * Local file and content URIs bypass disk caching to prevent redundant writes.
      */
-    fun playbackFactory(upstream: DataSource.Factory): DataSource.Factory =
-        cacheFactory(upstream)
+    fun playbackFactory(upstream: DataSource.Factory): DataSource.Factory = DataSource.Factory {
+        val cacheDs = cacheFactory(upstream).createDataSource()
+        val upstreamDs = upstream.createDataSource()
+        object : DataSource {
+            private var activeDs: DataSource = cacheDs
+
+            override fun addTransferListener(transferListener: androidx.media3.datasource.TransferListener) {
+                cacheDs.addTransferListener(transferListener)
+                upstreamDs.addTransferListener(transferListener)
+            }
+
+            override fun open(dataSpec: DataSpec): Long {
+                val scheme = dataSpec.uri.scheme
+                activeDs = if (scheme == "file" || scheme == "content") {
+                    upstreamDs
+                } else {
+                    cacheDs
+                }
+                return activeDs.open(dataSpec)
+            }
+
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+                activeDs.read(buffer, offset, length)
+
+            override fun getUri(): Uri? = activeDs.uri
+
+            override fun close() {
+                activeDs.close()
+            }
+        }
+    }
 
     private fun cacheFactory(upstream: DataSource.Factory) = CacheDataSource.Factory()
         .setCache(cache)
@@ -163,44 +220,64 @@ object AudioCache {
     }
 
     private var job: Job? = null
-    private var pendingId: String? = null
+    private var pendingQueue: List<String> = emptyList()
 
     /**
-     * Gets the track queued behind the one playing onto disk: its opening
-     * first, so it can start the moment it's reached, then the rest of it, so
-     * that seeking around it is a disk read from the first second it plays.
+     * Gets the queue ahead of the one playing warmed up, in play order.
      *
-     * Only the queued track, never the playing one. Media3 locks a cache entry
-     * to a single writer and the player holds that lock for as long as it is
-     * streaming the track — a fetch aimed at the same entry is quietly served
-     * from the network and written nowhere, spending the listener's data to
-     * cache precisely nothing. Caching a track before it is reached gets the
-     * same result without the contention.
+     * The first id gets the full treatment: its opening onto disk first, so
+     * it can start the moment it's reached, then the rest of it, so that
+     * seeking around it is a disk read from the first second it plays. Only
+     * that one track — never the one playing, and never bytes for anything
+     * further out. Media3 locks a cache entry to a single writer and the
+     * player holds that lock for as long as it is streaming the track — a
+     * fetch aimed at the same entry is quietly served from the network and
+     * written nowhere, spending the listener's data to cache precisely
+     * nothing. Caching a track before it is reached gets the same result
+     * without the contention. And full-track bytes for tracks that may never
+     * be reached would spend real mobile data on nothing.
      *
-     * Called freely; a fetch already running for the same track is left alone,
-     * and one for a different track is abandoned, since on a run of skips only
-     * the track actually settled on is worth the bandwidth.
+     * The next [QUEUE_LOOKAHEAD] ids past that one get a lighter treatment:
+     * just their stream URL resolved and held in [StreamResolver]'s own
+     * cache, not their bytes. That's the gap a fast run of skips actually
+     * falls into — the queue moving faster than a single-track read-ahead can
+     * follow it — and a resolve is cheap enough that warming several at once
+     * costs nothing worth guarding.
+     *
+     * Called freely; a call naming the same queue as the one already running
+     * is left alone, and a different one replaces it outright, since on a run
+     * of skips only wherever the listener actually lands is worth chasing.
      */
-    fun prefetchNext(videoId: String?) {
-        if (videoId == pendingId) return
-        pendingId = videoId
+    fun prefetchQueue(videoIds: List<String>) {
+        if (videoIds == pendingQueue) return
+        pendingQueue = videoIds
         job?.cancel()
-        job = videoId?.let { id ->
+        job = videoIds.firstOrNull()?.let { next ->
             scope.launch {
-                delay(PREFETCH_DELAY_MS)
-                fetch(id, 0, PRELOAD_BYTES)
-                fetchWhole(id)
+                launch {
+                    delay(PREFETCH_DELAY_MS)
+                    fetch(next, 0, PRELOAD_BYTES)
+                    fetchWhole(next)
+                }
+                launch {
+                    delay(PREFETCH_DELAY_MS)
+                    for (id in videoIds.drop(1).take(QUEUE_LOOKAHEAD)) {
+                        runCatching { StreamResolver.resolve(id) }
+                            .onFailure { Log.d(TAG, "queue warm-up skipped $id: ${it.message}") }
+                        delay(QUEUE_RESOLVE_STAGGER_MS)
+                    }
+                }
             }
         }
     }
 
     /**
-     * Nothing to read ahead for once playback stops. The id is cleared with the
-     * job, so resuming starts the fetch again rather than being mistaken for
-     * one already in hand.
+     * Nothing to read ahead for once playback stops. The queue is cleared with
+     * the job, so resuming starts the fetch again rather than being mistaken
+     * for one already in hand.
      */
     fun cancel() {
-        pendingId = null
+        pendingQueue = emptyList()
         job?.cancel()
         job = null
     }
@@ -249,6 +326,14 @@ object AudioCache {
         val upstream = upstreamFactory ?: return
         if (cache.getCachedBytes(videoId, position, length) >= length) return
 
+        // Read-ahead is the app's largest consumer of bandwidth and, until this
+        // line existed, its most invisible: whole tracks were pulled down while
+        // a listener waited on a resolve for the track in front of them, and
+        // nothing in the log said so. Bracketing it is what makes the overlap
+        // between "reading ahead" and "waiting for sound" readable at all.
+        val fetchStart = SystemClock.elapsedRealtime()
+        Log.d(TAG, "read-ahead fetching $videoId [$position, ${position + length})")
+
         val source = cacheFactory(upstream).createDataSource()
         val spec = DataSpec.Builder()
             .setUri(Uri.parse("bitchord://watch?v=$videoId"))
@@ -271,6 +356,12 @@ object AudioCache {
         }.onFailure {
             // Expected on a skip, and never worth failing playback over.
             Log.d(TAG, "read-ahead stopped for $videoId: ${it.message}")
+        }.onSuccess {
+            Log.d(
+                TAG,
+                "read-ahead fetched $videoId [$position, ${position + length}) in " +
+                    "${SystemClock.elapsedRealtime() - fetchStart}ms",
+            )
         }
     }
 }

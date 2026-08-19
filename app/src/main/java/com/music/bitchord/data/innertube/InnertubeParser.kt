@@ -5,9 +5,12 @@ import com.music.bitchord.data.model.ArtistPage
 import com.music.bitchord.data.model.BrowseItem
 import com.music.bitchord.data.model.BrowseType
 import com.music.bitchord.data.model.HomeShelf
+import com.music.bitchord.data.model.LikeStatus
 import com.music.bitchord.data.model.SearchResult
 import com.music.bitchord.data.model.ShelfItem
 import com.music.bitchord.data.model.Song
+import com.music.bitchord.data.model.SongMenu
+import com.music.bitchord.data.model.UserPlaylist
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -293,6 +296,57 @@ object InnertubeParser {
         return out.values.toList()
     }
 
+    /** A playlist page's own tracks, the ones YouTube suggests adding, and the token for the rest. */
+    data class PlaylistShelfPage(val songs: List<Song>, val suggested: List<Song>, val continuation: String?)
+
+    /**
+     * A playlist page's own track list, scoped rather than walked — plus
+     * whatever YouTube offers alongside it to round the playlist out.
+     *
+     * A playlist the account owns can carry a "Suggestions" shelf below the
+     * list actually built by hand — even a two-song playlist's own shelf
+     * comes back with a continuation token that, followed, serves it rather
+     * than running dry. That continuation is not another
+     * `musicPlaylistShelfContinuation` page, though: it lands as a plain
+     * `sectionListContinuation` carrying a `musicShelfRenderer` titled
+     * "Suggestions", structurally unrelated to the shelf the real tracks
+     * came from. Scoping only to the playlist shelf itself — as an earlier
+     * version of this function did — reads that continuation as belonging
+     * to nothing and drops it, suggestions included. So the scope here is
+     * the whole secondary column (or, for a continuation response, the
+     * whole `continuationContents`), and what tells a suggested row from a
+     * real one is `playlistItemData` — present on every row either way, but
+     * only a row actually in the playlist carries a `playlistSetVideoId`
+     * inside it, the id "remove from playlist" needs. [collectSongsDeep]
+     * has no notion of any of this, so a plain walk reads suggestions as
+     * songs the user added. Returns null off a page with nothing
+     * playlist-shaped in scope (an album, say), so callers fall back to the
+     * generic walk.
+     */
+    fun parsePlaylistShelf(root: JsonElement): PlaylistShelfPage? {
+        val scope: JsonElement = root.o("continuationContents")
+            ?: root.o("contents").o("twoColumnBrowseResultsRenderer").o("secondaryContents")
+            ?: return null
+        val looksLikePlaylist = collectRenderers(scope, "musicPlaylistShelfRenderer").isNotEmpty() ||
+            scope.o("musicPlaylistShelfContinuation") != null ||
+            collectRenderers(scope, "musicShelfRenderer").any { it.o("title").runs() == "Suggestions" }
+        if (!looksLikePlaylist) return null
+
+        val pageCredit = pageCredit(root)
+        val (songs, suggested) = collectRenderers(scope, "musicResponsiveListItemRenderer")
+            .mapNotNull { parseResponsiveListItem(it, pageCredit) }
+            .distinctBy { it.videoId }
+            .partition { it.setVideoId != null }
+        // The "Suggestions" shelf's own continuation reloads it with a fresh
+        // batch rather than paging it (see its "Refresh" button, wired to a
+        // `reloadContinuationData` token) — only the real `nextContinuationData`
+        // / `continuationItemRenderer` found in scope means more to fetch.
+        val token = collectRenderers(scope, "continuationItemRenderer").firstOrNull()
+            .o("continuationEndpoint").o("continuationCommand").s("token")
+            ?: collectRenderers(scope, "nextContinuationData").firstOrNull().s("continuation")
+        return PlaylistShelfPage(songs, suggested, token)
+    }
+
     /**
      * The cards on a library feed — saved playlists, albums, artists, podcasts.
      *
@@ -391,6 +445,10 @@ object InnertubeParser {
             artistId = credits.artistId ?: fallback.artistId,
             albumId = credits.albumId ?: fallback.albumId,
             albumName = credits.albumName ?: fallback.albumName,
+            // Only playlist rows carry one; on an album or a search hit this
+            // is simply absent, which is what makes "remove from playlist"
+            // offer itself exactly where it means something.
+            setVideoId = renderer.o("playlistItemData").s("playlistSetVideoId"),
             // The row type word is the clean signal when present ("All" tab);
             // otherwise a music-video upload gives itself away with widescreen
             // art where a catalogue track has square album cover art.
@@ -515,6 +573,102 @@ object InnertubeParser {
         return out.values.toList()
     }
 
+    /**
+     * The account's own state for one track, read off the watch queue's row
+     * menu: the thumbs rating, and the tokens that toggle library membership.
+     *
+     * Read from `next` rather than from anywhere cheaper because there is
+     * nowhere cheaper — no endpoint answers "is this liked" on its own, and
+     * library membership is only ever expressed as a pair of opaque tokens
+     * attached to a rendered row. The queue's own entry for the track carries
+     * both, so one call answers the whole menu.
+     *
+     * Scoped to [videoId]'s row: a watch queue is a list, and reading the
+     * first `likeButtonRenderer` in the response would answer for whichever
+     * track happened to be rendered first.
+     */
+    fun parseSongMenu(root: JsonElement, videoId: String): SongMenu? {
+        val row = collectRenderers(root, "playlistPanelVideoRenderer")
+            .firstOrNull { it.s("videoId") == videoId }
+            ?: return null
+
+        // Null, not INDIFFERENT, for anything this row doesn't actually say —
+        // see [SongMenu.likeStatus]. A missing like button and a stated
+        // "no rating" are different answers and must not collapse into one.
+        val likeStatus = when (
+            collectRenderers(row, "likeButtonRenderer").firstOrNull().s("likeStatus")
+        ) {
+            "LIKE" -> LikeStatus.LIKE
+            "DISLIKE" -> LikeStatus.DISLIKE
+            "INDIFFERENT" -> LikeStatus.INDIFFERENT
+            else -> null
+        }
+
+        // A row's menu carries several toggles that all hang a feedback token
+        // off the same endpoint — "Don't recommend this", "Remove from
+        // history". Only the one wearing a library icon is this one, and
+        // taking the first token that turned up meant reading a stranger's
+        // state: its default icon isn't LIBRARY_ADD, so every song it matched
+        // claimed to already be in the library.
+        val toggle = collectRenderers(row, "toggleMenuServiceItemRenderer")
+            .firstOrNull { it.feedbackToken("defaultServiceEndpoint") != null && it.isLibraryToggle }
+        // A toggle states the action available *now* as its default and the
+        // way back as its toggled half, so which icon leads also says whether
+        // the track is in the library already.
+        val defaultAdds = toggle.o("defaultIcon").s("iconType") == "LIBRARY_ADD"
+        val defaultToken = toggle.feedbackToken("defaultServiceEndpoint")
+        val toggledToken = toggle.feedbackToken("toggledServiceEndpoint")
+
+        return SongMenu(
+            likeStatus = likeStatus,
+            inLibrary = toggle != null && !defaultAdds,
+            addToLibraryToken = if (defaultAdds) defaultToken else toggledToken,
+            removeFromLibraryToken = if (defaultAdds) toggledToken else defaultToken,
+        )
+    }
+
+    private fun JsonElement?.feedbackToken(endpoint: String): String? =
+        this.o(endpoint).o("feedbackEndpoint").s("feedbackToken")
+
+    /**
+     * Whether a toggle menu item is the library one, told by its icons rather
+     * than by its label — the label is localised, the icon type never is.
+     */
+    private val JsonElement?.isLibraryToggle: Boolean
+        get() = LIBRARY_ICONS.any {
+            o("defaultIcon").s("iconType") == it || o("toggledIcon").s("iconType") == it
+        }
+
+    private val LIBRARY_ICONS = setOf("LIBRARY_ADD", "LIBRARY_REMOVE", "LIBRARY_SAVED")
+
+    /**
+     * The playlists the account can be asked to add a track to.
+     *
+     * `FEmusic_liked_playlists` also carries the "New playlist" tile (no
+     * browse id, so it never survives [parseLibraryItems]), the Liked Music
+     * auto-playlist and YouTube's own generated mixes — none of which take an
+     * edit.
+     *
+     * Filtered by exclusion rather than by requiring a `PL` prefix. Playlist
+     * ids are not as regular as they look, and a list that quietly drops the
+     * user's own playlist is worse than one that offers a playlist the edit
+     * endpoint then refuses — which it reports, and which the picker surfaces.
+     * Whether a playlist is *owned* rather than merely saved isn't stated on
+     * this feed at all.
+     */
+    fun parseUserPlaylists(root: JsonElement): List<UserPlaylist> =
+        parseLibraryItems(root).mapNotNull { item ->
+            val browseId = item.browseId ?: return@mapNotNull null
+            if (!browseId.startsWith("VL")) return@mapNotNull null
+            if (NOT_EDITABLE.any { browseId.startsWith("VL$it") }) return@mapNotNull null
+            UserPlaylist(
+                playlistId = browseId.removePrefix("VL"),
+                title = item.title,
+                subtitle = item.subtitle,
+                thumbnailUrl = item.thumbnailUrl,
+            )
+        }
+
     private fun parseTwoRowItem(renderer: JsonObject?): ShelfItem? {
         if (renderer == null) return null
         val title = renderer.o("title").runs()
@@ -554,6 +708,13 @@ object InnertubeParser {
             browseId = resolvedBrowseId,
         )
     }
+
+    /**
+     * Playlist-id prefixes nothing can be added to: `LM` is Liked Music (a
+     * song joins it by being liked), `SE` is Episodes for Later, `RD` is a
+     * generated radio mix, and `OLAK`/`MPRE` are albums wearing a playlist id.
+     */
+    private val NOT_EDITABLE = listOf("LM", "SE", "RD", "OLAK", "MPRE")
 
     private val DURATION = Regex("""\d+:\d{2}""")
     private val YEAR = Regex("""\d{4}""")

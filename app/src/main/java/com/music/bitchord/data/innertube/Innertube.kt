@@ -4,7 +4,9 @@ import android.util.Log
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.timeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.get
@@ -16,11 +18,16 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
+import com.music.bitchord.data.model.LikeStatus
+import com.music.bitchord.data.model.PlaylistPrivacy
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonArrayBuilder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
@@ -28,6 +35,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import java.io.IOException
 import java.security.MessageDigest
@@ -125,6 +133,9 @@ object Innertube {
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    /** See [postPlayer] — the per-request ceiling on the walk's hot path. */
+    private const val PLAYER_TIMEOUT_MS = 6_000L
+
     private val client = HttpClient(OkHttp) {
         // Same OkHttp instance ExoPlayer streams through — see Http.
         engine { preconfigured = com.music.bitchord.data.Http.client }
@@ -162,6 +173,19 @@ object Innertube {
         repeat(attempts - 1) {
             try {
                 return block()
+            } catch (e: HttpRequestTimeoutException) {
+                // Not weather, and not worth repeating. A timeout is this app's
+                // own decision that the request had long enough — so trying it
+                // again cannot learn anything the first attempt didn't, and the
+                // cost is multiplied rather than shared: [HttpRequestTimeoutException]
+                // is an [IOException], so before this branch existed every timed-out
+                // `player` call was quietly attempted three times. That turned a
+                // six-second ceiling into a nineteen-second one on a walk of
+                // seven clients, which is worse than the unbounded call the
+                // ceiling was added to prevent. Give up on this client and let
+                // the caller move to the next one.
+                Log.d(TAG, "not retrying, request timed out: ${e.message}")
+                throw e
             } catch (e: IOException) {
                 Log.d(TAG, "retrying: ${e.message}")
             }
@@ -233,8 +257,9 @@ object Innertube {
         videoId: String,
         client: PlayerClient,
         signatureTimestamp: Int? = null,
+        authenticated: Boolean = false,
     ): JsonObject {
-        val response = postPlayer(videoId, client, signatureTimestamp)
+        val response = postPlayer(videoId, client, signatureTimestamp, authenticated)
 
         val status = response["playabilityStatus"]?.jsonObject
             ?.get("status")?.jsonPrimitive?.content
@@ -345,6 +370,152 @@ object Innertube {
         }
     }.status.value
 
+    // ---- Writes -------------------------------------------------------------
+    //
+    // Everything below changes something on the account, so all of it needs
+    // the session cookie [postMusic] already signs with. None of it needs a
+    // new credential or a different client — the same WEB_REMIX identity that
+    // reads the library is the one allowed to edit it.
+
+    /** A write attempted without a session; the caller has a sign-in prompt to show. */
+    class NotSignedInException : IllegalStateException("Sign in to YouTube Music to do that")
+
+    private fun requireSession() {
+        if (cookie == null) throw NotSignedInException()
+    }
+
+    /**
+     * Thumbs up / down / neither, for [videoId].
+     *
+     * The response is inspected rather than discarded. Innertube answers a
+     * refused write with HTTP 200 and an `error` object in the body, so the
+     * status line alone will happily report a rating that never happened.
+     */
+    suspend fun rate(videoId: String, status: LikeStatus) {
+        requireSession()
+        val endpoint = when (status) {
+            LikeStatus.LIKE -> "like/like"
+            LikeStatus.DISLIKE -> "like/dislike"
+            LikeStatus.INDIFFERENT -> "like/removelike"
+        }
+        val response = postMusic(endpoint) {
+            putJsonObject("target") { put("videoId", videoId) }
+        }
+        response["error"]?.let { error ->
+            val message = error.jsonObject["message"]?.jsonPrimitive?.contentOrNull
+            error("YouTube Music refused the rating: ${message ?: error}")
+        }
+        // YouTube states what it did in the toast it would have shown. Worth
+        // keeping: a rating it declines to act on still answers 200, and this
+        // one line is the difference between "the call was made" and "the
+        // call did something".
+        Log.d(TAG, "$endpoint $videoId -> ${findString(response, "text") ?: "no confirmation"}")
+    }
+
+    /**
+     * Adds or removes a track from the library, using a token minted by
+     * YouTube for exactly that transition — see [com.music.bitchord.data.model.SongMenu].
+     * There is no video-id form of this call; the token *is* the request.
+     */
+    suspend fun sendFeedback(token: String) {
+        requireSession()
+        postMusic("feedback") {
+            putJsonArray("feedbackTokens") { add(token) }
+        }
+    }
+
+    /**
+     * Creates a playlist and returns its id.
+     *
+     * [videoIds] seeds it in the same request, which is what "add to a new
+     * playlist" is: one round trip rather than a create followed by an edit
+     * that could half-succeed.
+     */
+    suspend fun createPlaylist(
+        title: String,
+        privacy: PlaylistPrivacy,
+        description: String? = null,
+        videoIds: List<String> = emptyList(),
+    ): String {
+        requireSession()
+        val response = postMusic("playlist/create") {
+            put("title", title)
+            put("description", description.orEmpty())
+            put("privacyStatus", privacy.apiValue)
+            if (videoIds.isNotEmpty()) {
+                putJsonArray("videoIds") { videoIds.forEach { add(it) } }
+            }
+        }
+        // Normally a bare top-level id; occasionally only inside the command
+        // that would navigate the web client to the new page, so fall back to
+        // finding it by name rather than by a path that would rot.
+        return response["playlistId"]?.jsonPrimitive?.contentOrNull
+            ?: findString(response, "playlistId")
+            ?: error("playlist created but no id came back")
+    }
+
+    suspend fun deletePlaylist(playlistId: String) {
+        requireSession()
+        postMusic("playlist/delete") { put("playlistId", playlistId.removePrefix("VL")) }
+    }
+
+    /**
+     * One or more edits to a playlist, applied together.
+     *
+     * The endpoint answers `STATUS_SUCCEEDED` rather than an HTTP error when
+     * it refuses — a playlist the account merely saved rather than owns is
+     * the usual reason — so the body is checked as well as the status line.
+     */
+    private suspend fun editPlaylist(
+        playlistId: String,
+        actions: JsonArrayBuilder.() -> Unit,
+    ) {
+        requireSession()
+        val response = postMusic("browse/edit_playlist") {
+            // The edit endpoint takes the raw id; `VL` is the browse prefix.
+            put("playlistId", playlistId.removePrefix("VL"))
+            putJsonArray("actions", actions)
+        }
+        val status = response["status"]?.jsonPrimitive?.contentOrNull
+        if (status != null && status != "STATUS_SUCCEEDED") {
+            error("YouTube Music refused the edit ($status)")
+        }
+    }
+
+    suspend fun addToPlaylist(playlistId: String, videoIds: List<String>) =
+        editPlaylist(playlistId) {
+            videoIds.forEach { videoId ->
+                addJsonObject {
+                    put("action", "ACTION_ADD_VIDEO")
+                    put("addedVideoId", videoId)
+                }
+            }
+        }
+
+    /**
+     * Removes entries from a playlist. Keyed by set-video-id as well as video
+     * id: the same track added twice is two entries, and only the pair says
+     * which of them to drop.
+     */
+    suspend fun removeFromPlaylist(playlistId: String, entries: List<Pair<String, String>>) =
+        editPlaylist(playlistId) {
+            entries.forEach { (setVideoId, videoId) ->
+                addJsonObject {
+                    put("action", "ACTION_REMOVE_VIDEO")
+                    put("setVideoId", setVideoId)
+                    put("removedVideoId", videoId)
+                }
+            }
+        }
+
+    suspend fun renamePlaylist(playlistId: String, title: String) =
+        editPlaylist(playlistId) {
+            addJsonObject {
+                put("action", "ACTION_SET_PLAYLIST_NAME")
+                put("playlistName", title)
+            }
+        }
+
     /** A fresh client-playback-nonce, identifying one play of one track. */
     fun newCpn(): String = (1..16).map { CPN_ALPHABET.random() }.joinToString("")
 
@@ -404,20 +575,43 @@ object Innertube {
     }
 
     /**
-     * Deliberately unauthenticated.
+     * Unauthenticated by default.
      *
-     * The app clients this walks through are answered *because* they look like
-     * anonymous devices; attaching the session cookie to one is what gets it
-     * turned away with `LOGIN_REQUIRED`. Nothing about the account is needed to
-     * fetch audio — history is credited separately, by [playbackTracking] and
-     * the stats pings, which do carry the session.
+     * The app clients [StreamResolver] walks through are answered *because*
+     * they look like anonymous devices; attaching the session cookie to one
+     * of those is what gets it turned away with `LOGIN_REQUIRED`. Nothing
+     * about the account is needed to fetch audio through them — history is
+     * credited separately, by [playbackTracking] and the stats pings, which
+     * do carry the session.
+     *
+     * [authenticated] is the one deliberate exception: [PlayerClient.WEB_REMIX]
+     * is a browser identity, and a browser without the session cookie a
+     * signed-in listener actually has is the thing that reads as suspicious,
+     * not the other way around. Only meaningful with [cookie] set — a caller
+     * asking for it while signed out gets the same unauthenticated request as
+     * everything else.
      */
     private suspend fun postPlayer(
         videoId: String,
         playerClient: PlayerClient,
         signatureTimestamp: Int?,
+        authenticated: Boolean = false,
     ): JsonObject =
         client.post("${playerClient.apiBase()}/player") {
+            // A much tighter budget than the shared 30 seconds, because this is
+            // the one request on a loop. A player call that is going to answer
+            // answers in 120-330ms; one that is going to hang is indifferent to
+            // how long it is given, and there are up to seven clients walked
+            // per track, each of which may be retried. At the shared ceiling a
+            // single unlucky client turned a walk that normally costs two
+            // seconds into forty-nine, which the listener spends staring at a
+            // track that will in the end be served by extraction anyway. Six
+            // seconds is twenty times a healthy answer and cheap to give up on.
+            //
+            // Set here rather than on the shared client on purpose: browse and
+            // search return payloads orders of magnitude larger over the same
+            // connection, and a ceiling right for this would truncate those.
+            timeout { requestTimeoutMillis = PLAYER_TIMEOUT_MS }
             contentType(ContentType.Application.Json)
             parameter("prettyPrint", "false")
             header("User-Agent", playerClient.userAgent)
@@ -428,6 +622,13 @@ object Innertube {
             // Shared with browse/search so one session is seen throughout,
             // rather than a device that mints a new identity per request.
             visitorData?.let { header("X-Goog-Visitor-Id", it) }
+            if (authenticated) {
+                cookie?.let { c ->
+                    header("Cookie", c)
+                    header("X-Goog-AuthUser", "0")
+                    sapisidFrom(c)?.let { header("Authorization", sapisidHash(it)) }
+                }
+            }
             setBody(
                 buildJsonObject {
                     putJsonObject("context") {
@@ -460,6 +661,14 @@ object Innertube {
 
     /** Browser-shaped clients are served from the Music host; app clients from YouTube proper. */
     private fun PlayerClient.apiBase(): String = if (usesMusicHost) MUSIC_BASE else YT_BASE
+
+    /** First string value under [key] anywhere in [element], depth-first. */
+    private fun findString(element: JsonElement, key: String): String? = when (element) {
+        is JsonObject -> (element[key] as? JsonPrimitive)?.contentOrNull
+            ?: element.values.firstNotNullOfOrNull { findString(it, key) }
+        is JsonArray -> element.firstNotNullOfOrNull { findString(it, key) }
+        else -> null
+    }
 
     private fun sapisidFrom(cookieHeader: String): String? =
         cookieHeader.split("; ", ";")

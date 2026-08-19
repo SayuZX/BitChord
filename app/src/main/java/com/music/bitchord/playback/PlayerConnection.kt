@@ -1,6 +1,7 @@
 package com.music.bitchord.playback
 
 import android.content.ComponentName
+import android.net.Uri
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -21,6 +22,7 @@ import com.music.bitchord.data.model.NOTIFICATION_ART_PX
 import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.model.artworkAt
 import kotlinx.coroutines.delay
+import java.io.File
 
 /** Snapshot of playback state, driven by the MediaController. */
 data class PlayerState(
@@ -120,6 +122,8 @@ fun MediaItem.toSong() = Song(
     artist = mediaMetadata.artist?.toString().orEmpty(),
     thumbnailUrl = mediaMetadata.artworkUri?.toString(),
     fromAutoplay = this.fromAutoplay,
+    localUri = mediaMetadata.extras?.getString(EXTRA_LOCAL_URI),
+    localPath = mediaMetadata.extras?.getString(EXTRA_LOCAL_PATH),
 )
 
 /** @see Song.fromAutoplay */
@@ -132,6 +136,12 @@ val MediaItem.fromAutoplay: Boolean
  * the player, and the UI only ever sees it back through a MediaController.
  */
 private const val EXTRA_FROM_AUTOPLAY = "bitchord.fromAutoplay"
+
+/** @see Song.localUri */
+private const val EXTRA_LOCAL_URI = "bitchord.localUri"
+
+/** @see Song.localPath */
+private const val EXTRA_LOCAL_PATH = "bitchord.localPath"
 
 /**
  * Where AutoPlay's section of the queue begins, and so where a track queued by
@@ -177,9 +187,35 @@ fun MediaController.dropAutoplayTracks() {
  * resolved to (or the video's own audio, as the deliberate fallback when no
  * match was found).
  */
-fun Song.toMediaItem(): MediaItem = MediaItem.Builder()
-    .setMediaId(videoId)
-    .setUri("bitchord://watch?v=$videoId")
+/**
+ * MP4-family containers (m4a/aac/amr/wma/...) store their header or trailing
+ * metadata in a way that needs backward seeking to parse, which the
+ * content:// route (ContentDataSource) doesn't reliably support — the same
+ * bytes read fine as a plain file. Formats like flac/mp3/ogg/webm already
+ * seek correctly through content:// and are left alone.
+ */
+private val DIRECT_FILE_URI_EXTENSIONS = setOf(
+    "m4a", "m4b", "m4p", "mp4", "aac", "3ga", "3gp", "3gpp",
+    "alac", "amr", "awb", "wma", "aif", "aiff", "ac3", "dts",
+)
+
+private fun resolvePlaybackUri(uriString: String, localPath: String?): String {
+    if (localPath.isNullOrBlank() || !uriString.startsWith("content://")) return uriString
+    val ext = localPath.substringAfterLast('.', "").lowercase()
+    if (ext !in DIRECT_FILE_URI_EXTENSIONS) return uriString
+    val file = File(localPath)
+    return if (file.exists() && file.canRead()) Uri.fromFile(file).toString() else uriString
+}
+
+fun Song.toMediaItem(): MediaItem {
+    val uriString = localUri ?: if (videoId.startsWith("content://") || videoId.startsWith("file://")) {
+        videoId
+    } else {
+        "bitchord://watch?v=$videoId"
+    }
+    return MediaItem.Builder()
+        .setMediaId(videoId)
+        .setUri(resolvePlaybackUri(uriString, localPath))
     .setMediaMetadata(
         MediaMetadata.Builder()
             .setTitle(title)
@@ -194,11 +230,29 @@ fun Song.toMediaItem(): MediaItem = MediaItem.Builder()
             .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
             .setIsPlayable(true)
             .setIsBrowsable(false)
-            // Which section of the queue this belongs to, carried with it.
-            .apply { if (fromAutoplay) setExtras(bundleOf(EXTRA_FROM_AUTOPLAY to true)) }
+            // What a queue entry has to carry about itself: which section of
+            // the queue it belongs to, and whether it is playing off the
+            // device. The uri two lines up answers the second question but
+            // does not survive the trip back out — Media3 leaves a MediaItem's
+            // localConfiguration out of the bundle it sends to a
+            // MediaController — so without this a track playing from a file
+            // reaches the UI looking like any other YouTube track, and the
+            // player's menu offers to rate, download and share it.
+            .apply {
+                if (fromAutoplay || localUri != null) {
+                    setExtras(
+                        bundleOf(
+                            EXTRA_FROM_AUTOPLAY to fromAutoplay,
+                            EXTRA_LOCAL_URI to localUri,
+                            EXTRA_LOCAL_PATH to localPath,
+                        ),
+                    )
+                }
+            }
             .build(),
     )
     .build()
+}
 
 fun MediaController.playSongs(songs: List<Song>, startIndex: Int) {
     if (songs.isEmpty()) return

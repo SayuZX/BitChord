@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
+import android.util.Log
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
@@ -14,6 +15,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DecoderReuseEvaluation
@@ -35,6 +37,10 @@ import com.music.bitchord.data.NerdStats
 import com.music.bitchord.data.innertube.PlaybackTracker
 import com.music.bitchord.data.innertube.PlayerClient
 import com.music.bitchord.data.innertube.StreamResolver
+import com.music.bitchord.data.model.Song
+import com.music.bitchord.data.scrobbling.LastFM
+import com.music.bitchord.data.scrobbling.ListenBrainzManager
+import com.music.bitchord.data.scrobbling.ScrobbleManager
 import com.music.bitchord.data.settings.AppSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -46,6 +52,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 
 /** Past this point in a track, back restarts it instead of skipping to the previous one. */
 const val BACK_RESTARTS_AFTER_MS = 10_000L
@@ -71,6 +79,21 @@ class PlaybackService : MediaSessionService() {
     private var crossfade: CrossfadeController? = null
     private val spatialAudioProcessor = SpatialAudioProcessor()
 
+    /** Shared with the crossfade's tail player, so both read the same disk cache. */
+    private var mediaSourceFactory: DefaultMediaSourceFactory? = null
+
+    /** Last sampled position of the playing track, in seconds. */
+    private var lastPositionSeconds = 0L
+
+    /** When the current track was chosen, for the time-to-first-audio log. */
+    private var trackSelectedAt: Long? = null
+
+    private var scrobbleManager: ScrobbleManager? = null
+    private var listenBrainzSong: Song? = null
+
+    private var listenBrainzStartMs: Long = 0L
+
+    private var listenBrainzDurationMs: Long? = null
     /**
      * The crossfade's tail player runs its own audio sink, so it needs its own
      * instance of the effect — [SpatialAudioProcessor] carries a delay line and
@@ -78,12 +101,6 @@ class PlaybackService : MediaSessionService() {
      */
     private val ghostSpatialAudioProcessor = SpatialAudioProcessor()
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-
-    /** Shared with the crossfade's tail player, so both read the same disk cache. */
-    private var mediaSourceFactory: DefaultMediaSourceFactory? = null
-
-    /** Last sampled position of the playing track, in seconds. */
-    private var lastPositionSeconds = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -109,7 +126,17 @@ class PlaybackService : MediaSessionService() {
         ) { dataSpec ->
             val videoId = dataSpec.uri.getQueryParameter("v")
                 ?: return@Factory dataSpec
-            val streamUrl = runBlocking { StreamResolver.resolve(videoId) }
+            val downloadedUri = runBlocking { com.music.bitchord.download.Downloads.savedUri(this@PlaybackService, videoId) }
+            if (downloadedUri != null) {
+                return@Factory dataSpec.buildUpon().setUri(downloadedUri).build()
+            }
+            val streamUrl = try {
+                runBlocking {
+                    withTimeout(RESOLVE_TIMEOUT_MS) { StreamResolver.resolve(videoId) }
+                }
+            } catch (e: TimeoutCancellationException) {
+                throw java.io.IOException("Stream resolution timed out for $videoId", e)
+            }
             dataSpec.buildUpon()
                 .setUri(Uri.parse(streamUrl))
                 // googlevideo names the client that minted the URL inside the
@@ -121,8 +148,9 @@ class PlaybackService : MediaSessionService() {
                 .build()
         }
         // Read-ahead resolves streams through the same chain the player does.
-        AudioCache.setUpstream(resolvingFactory)
-        mediaSourceFactory = DefaultMediaSourceFactory(AudioCache.playbackFactory(resolvingFactory))
+        val defaultDataSourceFactory = DefaultDataSource.Factory(this, resolvingFactory)
+        AudioCache.setUpstream(defaultDataSourceFactory)
+        mediaSourceFactory = DefaultMediaSourceFactory(AudioCache.playbackFactory(defaultDataSourceFactory))
 
         val exoPlayer = ExoPlayer.Builder(this)
             .setRenderersFactory(silenceSkippingRenderers(spatialAudioProcessor))
@@ -145,6 +173,7 @@ class PlaybackService : MediaSessionService() {
         AppSettings.audioSessionId.value = exoPlayer.audioSessionId
         applySettings(exoPlayer)
         observeSettings()
+        observeScrobbling()
         watchSleepTimer()
         // Before the listener below is attached, so loading the queue doesn't
         // read as a track change and set the read-ahead going.
@@ -154,30 +183,85 @@ class PlaybackService : MediaSessionService() {
         // playback starts and when the queue moves on while already playing.
         exoPlayer.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                // The only number that describes what a listener actually
+                // waits through. Every other timing in this app measures one
+                // leg of getting a track started — a resolve, a client walk, an
+                // extraction — and a leg being fast has repeatedly turned out
+                // to say nothing about whether sound arrived quickly, because
+                // the legs that were measured were the ones running in the
+                // background for tracks nobody was waiting on.
+                if (isPlaying) {
+                    trackSelectedAt?.let {
+                        Log.d(
+                            "BitChord",
+                            "TIMING first audio: ${SystemClock.elapsedRealtime() - it}ms since track selected",
+                        )
+                        trackSelectedAt = null
+                    }
+                }
                 if (isPlaying) registerCurrentPlay()
                 // Nothing to read ahead for while paused, and a pause is often
                 // the last thing that happens before the process goes idle.
                 if (isPlaying) prefetchAround(exoPlayer) else AudioCache.cancel()
                 saveQueue()
+
+                val song = exoPlayer.currentMediaItem?.toSong()
+                val durationMs = exoPlayer.duration.takeIf { it > 0 }
+                scrobbleManager?.onPlayerStateChanged(isPlaying, song, durationMs)
+
+                // ListenBrainz: "now playing" on play/resume too, not just on
+                // transition — a track started from idle or resumed from pause
+                // otherwise stays silent on the site.
+                if (isPlaying && song != null) {
+                    if (listenBrainzSong == null) {
+                        listenBrainzSong = song
+                        listenBrainzStartMs = System.currentTimeMillis()
+                        listenBrainzDurationMs = durationMs
+                    }
+                    submitListenBrainzPlayingNow(song, exoPlayer.currentPosition, durationMs)
+                }
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // Where the wait starts, for the log in onIsPlayingChanged.
+                trackSelectedAt = SystemClock.elapsedRealtime()
+                Log.d("BitChord", "TIMING track selected: ${mediaItem?.mediaId} (reason=$reason)")
+
                 // currentPosition already belongs to the new item by now, so
                 // the outgoing track is closed out on the last sampled value.
                 PlaybackTracker.onTrackChanged(lastPositionSeconds)
                 lastPositionSeconds = 0
-                // "Sleep after this song": the queue moving on by itself is the
-                // moment the track the user meant has finished. REPEAT counts
-                // too, or the timer would never fire with repeat-one on.
-                //
-                // A crossfade arrives as a SEEK, because moving the queue on
-                // early is exactly how it starts the next track while the last
-                // one is still fading. Indistinguishable from a manual skip
-                // from here, so the crossfade says which of the two it was.
+
+                // Scrobbling: stop old song, start new song
+                scrobbleManager?.onSongStop()
+                val newSong = mediaItem?.toSong()
+                val durationMs = exoPlayer.duration.takeIf { it > 0 }
+                scrobbleManager?.onSongStart(newSong, durationMs)
+
+                // ListenBrainz: submit finished for old song, playing_now for new song.
+                // The finished listen only counts when the track actually ended —
+                // an auto-advance, a repeat, or a crossfade at the very end. A
+                // manual skip (SEEK) means the song wasn't listened to, so it must
+                // not be scrobbled.
                 val crossfaded = crossfade?.consumeAutoAdvance() == true
                 val ended = crossfaded ||
                     reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
                     reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+                val prevSong = listenBrainzSong
+                val prevStart = listenBrainzStartMs
+                if (prevSong != null && ended) {
+                    submitListenBrainzFinished(prevSong, prevStart, listenBrainzDurationMs)
+                }
+                listenBrainzSong = newSong
+                listenBrainzStartMs = System.currentTimeMillis()
+                listenBrainzDurationMs = durationMs
+                if (newSong != null) {
+                    submitListenBrainzPlayingNow(newSong, 0L, durationMs)
+                }
+
+                // "Sleep after this song": the queue moving on by itself is the
+                // moment the track the user meant has finished. REPEAT counts
+                // too, or the timer would never fire with repeat-one on.
                 if (ended && SleepTimer.afterTrack.value) {
                     exoPlayer.pause()
                     SleepTimer.cancel()
@@ -193,7 +277,19 @@ class PlaybackService : MediaSessionService() {
             // Nothing follows the last track, so there is no transition to
             // pause on — the queue simply runs out and the timer is spent.
             override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_ENDED) SleepTimer.cancel()
+                if (state == Player.STATE_ENDED) {
+                    SleepTimer.cancel()
+                    // The last track finished with nothing after it, so no
+                    // transition will ever close it out. Scrobble it now.
+                    val lastSong = listenBrainzSong
+                    if (lastSong != null) {
+                        val lastStart = listenBrainzStartMs
+                        val lastDuration = listenBrainzDurationMs
+                            ?: exoPlayer.duration.takeIf { it > 0 }
+                        submitListenBrainzFinished(lastSong, lastStart, lastDuration)
+                        listenBrainzSong = null
+                    }
+                }
             }
 
             /**
@@ -355,13 +451,18 @@ class PlaybackService : MediaSessionService() {
     }
 
     /**
-     * Hands the cache the track being played and the one queued behind it.
+     * Hands the cache the queue ahead of the one playing: [AudioCache.QUEUE_DEPTH]
+     * tracks is more than it does anything with, but it decides that, not this.
      */
     private fun prefetchAround(player: ExoPlayer) {
-        val next = player.nextMediaItemIndex
-            .takeIf { it != C.INDEX_UNSET }
-            ?.let { player.getMediaItemAt(it).mediaId }
-        AudioCache.prefetchNext(next)
+        val nextIndex = player.nextMediaItemIndex
+        val upcomingIds = if (nextIndex != C.INDEX_UNSET) {
+            val end = (nextIndex + AudioCache.QUEUE_DEPTH - 1).coerceAtMost(player.mediaItemCount - 1)
+            (nextIndex..end).map { player.getMediaItemAt(it).mediaId }
+        } else {
+            emptyList()
+        }
+        AudioCache.prefetchQueue(upcomingIds)
     }
 
     /**
@@ -526,6 +627,99 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
+    private fun observeScrobbling() {
+        // Rebuild the ScrobbleManager whenever scrobbling settings change.
+        scope.launch {
+            combine(
+                AppSettings.lastfmEnabled,
+                AppSettings.lastfmScrobbleEnabled,
+                AppSettings.lastfmNowPlaying,
+                AppSettings.lastfmSessionKey,
+                AppSettings.lastfmApiKey,
+                AppSettings.lastfmSecret,
+                AppSettings.lastfmEndpoint,
+                AppSettings.scrobbleMinDuration,
+                AppSettings.scrobbleDelayPercent,
+                AppSettings.scrobbleDelaySeconds,
+            ) { values ->
+                ScrobblingSnapshot(
+                    lastfmEnabled = values[0] as Boolean,
+                    scrobbleEnabled = values[1] as Boolean,
+                    nowPlaying = values[2] as Boolean,
+                    sessionKey = values[3] as String,
+                    apiKey = values[4] as String,
+                    secret = values[5] as String,
+                    endpoint = values[6] as String,
+                    minDuration = values[7] as Int,
+                    delayPercent = values[8] as Float,
+                    delaySeconds = values[9] as Int,
+                )
+            }.collectLatest { snapshot ->
+                scrobbleManager?.destroy()
+                scrobbleManager = null
+
+                if (snapshot.lastfmEnabled && snapshot.sessionKey.isNotBlank()) {
+                    // Configure LastFM client
+                    val endpoint = snapshot.endpoint.ifBlank { LastFM.DEFAULT_API_ENDPOINT }
+                    val apiKey = snapshot.apiKey.ifBlank { LastFM.FALLBACK_COMPAT_API_KEY }
+                    val secret = snapshot.secret.ifBlank { LastFM.FALLBACK_COMPAT_SECRET }
+                    LastFM.configure(
+                        endpoint = endpoint,
+                        apiKey = apiKey,
+                        secret = secret,
+                        sessionKey = snapshot.sessionKey,
+                    )
+                    scrobbleManager = ScrobbleManager(
+                        scope = scope,
+                        minSongDuration = snapshot.minDuration,
+                        scrobbleDelayPercent = snapshot.delayPercent,
+                        scrobbleDelaySeconds = snapshot.delaySeconds,
+                    ).apply {
+                        useNowPlaying = snapshot.nowPlaying
+                    }
+                }
+            }
+        }
+    }
+
+    private data class ScrobblingSnapshot(
+        val lastfmEnabled: Boolean,
+        val scrobbleEnabled: Boolean,
+        val nowPlaying: Boolean,
+        val sessionKey: String,
+        val apiKey: String,
+        val secret: String,
+        val endpoint: String,
+        val minDuration: Int,
+        val delayPercent: Float,
+        val delaySeconds: Int,
+    )
+
+    /**
+     * Submits a finished ListenBrainz listen, but only if the service is
+     * actually scrobbling — the settings are read at call time so the helper
+     * stays a no-op whenever ListenBrainz is switched off.
+     */
+    private fun submitListenBrainzFinished(song: Song, startMs: Long, durationMs: Long?) {
+        val lbEnabled = AppSettings.listenBrainzEnabled.value
+        val lbToken = AppSettings.listenBrainzToken.value
+        if (!lbEnabled || lbToken.isBlank()) return
+        val endMs = System.currentTimeMillis()
+        scope.launch {
+            ListenBrainzManager.submitFinished(lbToken, song, startMs, endMs, durationMs)
+        }
+    }
+
+    /** Sends a ListenBrainz "now playing" update for the current track. */
+    private fun submitListenBrainzPlayingNow(song: Song, positionMs: Long, durationMs: Long?) {
+        val lbEnabled = AppSettings.listenBrainzEnabled.value
+        val lbToken = AppSettings.listenBrainzToken.value
+        if (!lbEnabled || lbToken.isBlank()) return
+        scope.launch {
+            ListenBrainzManager.submitPlayingNow(lbToken, song, positionMs, durationMs)
+        }
+    }
+
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? =
         mediaSession
 
@@ -533,6 +727,27 @@ class PlaybackService : MediaSessionService() {
         // Last chance to record the resume point, while the player still exists.
         saveQueue()
         AudioCache.cancel()
+        // Also the last chance to close out the track that was playing — a
+        // swipe-away or stop never fires STATE_ENDED, so the session would
+        // otherwise end with an un-scrobbled song. This must not ride on the
+        // service scope: it is cancelled a few lines down, and the request
+        // should still reach ListenBrainz.
+        val lastSong = listenBrainzSong
+        if (lastSong != null) {
+            val lbEnabled = AppSettings.listenBrainzEnabled.value
+            val lbToken = AppSettings.listenBrainzToken.value
+            if (lbEnabled && lbToken.isNotBlank()) {
+                val lastStart = listenBrainzStartMs
+                val lastDuration = player?.duration?.takeIf { it > 0 }
+                CoroutineScope(Dispatchers.IO).launch {
+                    ListenBrainzManager.submitFinished(
+                        lbToken, lastSong, lastStart, System.currentTimeMillis(), lastDuration,
+                    )
+                }
+            }
+        }
+        scrobbleManager?.destroy()
+        scrobbleManager = null
         scope.cancel()
         crossfade?.release()
         crossfade = null
@@ -624,5 +839,21 @@ class PlaybackService : MediaSessionService() {
 
         /** More room after a stall than at the start — see the load control. */
         const val RESUME_PLAYBACK_MS = 2_000
+
+        /**
+         * Outer cap on stream resolution. Individual client calls and probes
+         * have their own timeouts, but iterating all seven plus the NewPipe
+         * fallback can accumulate far beyond what a listener should wait.
+         *
+         * The NewPipe fallback alone — a scrape of the watch page, shaped
+         * harder than anything else this app asks Google for — routinely
+         * takes 45-90s on its own when every player client is bot-checked, a
+         * state that has become the common case rather than the rare one. A
+         * cap shorter than that doesn't bound the wait; it cancels the
+         * resolve just as it was about to succeed, and the retry that
+         * follows restarts the same slow walk from zero, so the listener
+         * waits *longer* under a tighter cap than a looser one.
+         */
+        const val RESOLVE_TIMEOUT_MS = 120_000L
     }
 }

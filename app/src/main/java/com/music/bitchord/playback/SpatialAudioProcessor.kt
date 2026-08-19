@@ -42,9 +42,29 @@ class SpatialAudioProcessor : BaseAudioProcessor() {
     private var lowpassLeft = 0f
     private var lowpassRight = 0f
 
+    /**
+     * Stereo 16-bit only: the widening is written in terms of a left and a
+     * right sample, and there is no mid/side of a mono voice note or of a 5.1
+     * mix to widen.
+     *
+     * Bowing out with [AudioProcessor.AudioFormat.NOT_SET] rather than an
+     * [AudioProcessor.UnhandledAudioFormatException] is what keeps those
+     * tracks playable at all.
+     * [DefaultAudioSink][androidx.media3.exoplayer.audio.DefaultAudioSink]
+     * configures every processor in its chain whether or not the effect is
+     * switched on, and a throw from any
+     * of them fails the whole sink — the renderer dies with
+     * "MediaCodecAudioRenderer error" before a sample is written. NOT_SET
+     * means "inactive for this format" and the chain routes around this
+     * processor instead.
+     *
+     * Nothing from YouTube is anything but stereo, so this only ever showed
+     * itself on files from the device: every mono or multichannel track in the
+     * local library failed to play while downloads were fine.
+     */
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT || inputAudioFormat.channelCount != 2) {
-            throw AudioProcessor.UnhandledAudioFormatException(inputAudioFormat)
+            return AudioProcessor.AudioFormat.NOT_SET
         }
         val delaySamples = (inputAudioFormat.sampleRate * DELAY_MS / 1000f)
             .roundToInt()
