@@ -681,11 +681,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun recordSearch() = SearchHistory.record(_query.value)
 
+    /**
+     * The keyboard's search/enter action. A deliberate "I'm done typing", so
+     * it jumps the debounce queue rather than waiting out [SEARCH_DEBOUNCE_MS]
+     * behind it — that wait exists for keystrokes, not for a user who already
+     * told us they're finished.
+     */
+    fun submitSearch() {
+        recordSearch()
+        runSearch(immediate = true)
+    }
+
     /** Re-runs a term picked out of the history, and floats it back to the top. */
     fun searchFor(term: String) {
         _query.value = term
         SearchHistory.record(term)
-        runSearch()
+        runSearch(immediate = true)
     }
 
     fun removeSearch(term: String) = SearchHistory.remove(term)
@@ -695,7 +706,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun onFilterChange(value: SearchFilter) {
         if (_filter.value == value) return
         _filter.value = value
-        runSearch()
+        runSearch(immediate = true)
     }
 
     /**
@@ -703,8 +714,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *
      * [requestId] is what makes a late answer harmless: a response is only
      * written to the screen if its id is still the newest one asked for.
+     * [immediate] is set for a deliberate action — submitting, tapping a
+     * filter, picking a history entry — so the pipeline can skip the
+     * keystroke debounce for it.
      */
-    private data class SearchRequest(val query: String, val filter: SearchFilter, val requestId: Long)
+    private data class SearchRequest(
+        val query: String,
+        val filter: SearchFilter,
+        val requestId: Long,
+        val immediate: Boolean = false,
+    )
 
     private fun cacheKey(query: String, filter: SearchFilter) = "${filter.name}:$query"
 
@@ -720,7 +739,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             ?.value
     }
 
-    private fun runSearch() {
+    private fun runSearch(immediate: Boolean = false) {
         val query = _query.value
         if (query.isBlank()) {
             // Nothing in flight can still be waiting to overwrite this: the
@@ -730,7 +749,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val id = newestRequestId.incrementAndGet()
-        searchRequests.tryEmit(SearchRequest(query, _filter.value, id))
+        searchRequests.tryEmit(SearchRequest(query, _filter.value, id, immediate))
     }
 
     /**
@@ -745,11 +764,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * in any trouble. [debounce] collapses a burst of keystrokes into one
      * query before any request is made, and [collectLatest] only abandons a
      * search once a genuinely newer one has survived that window.
+     *
+     * The wait is skipped entirely for [SearchRequest.immediate] requests —
+     * submitting from the keyboard is the user telling us they're done typing,
+     * so it shouldn't sit behind the same delay that exists to absorb the
+     * keystrokes leading up to it.
      */
     @OptIn(FlowPreview::class)
     private fun startSearchPipeline() = viewModelScope.launch {
         searchRequests
-            .debounce(SEARCH_DEBOUNCE_MS)
+            .debounce { if (it.immediate) 0L else SEARCH_DEBOUNCE_MS }
             .collectLatest { request ->
                 val key = cacheKey(request.query, request.filter)
                 // Something to look at immediately: the exact answer if this
@@ -799,10 +823,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         /**
-         * Short enough that it reads as instant, long enough that a word typed
-         * at speed is one request rather than one per letter.
+         * Deliberately generous: long enough that typing a full query rarely
+         * outruns it, since [SearchRequest.immediate] is the fast path for a
+         * user who wants results before that — pressing search/enter on the
+         * keyboard — not this timer.
          */
-        const val SEARCH_DEBOUNCE_MS = 80L
+        const val SEARCH_DEBOUNCE_MS = 2000L
 
         const val SEARCH_CACHE_ENTRIES = 100
     }

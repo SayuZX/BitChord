@@ -710,7 +710,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                         )
                     },
                     history = searchHistory,
-                    onSubmit = viewModel::recordSearch,
+                    onSubmit = viewModel::submitSearch,
                     onHistoryClick = viewModel::searchFor,
                     onHistoryRemove = viewModel::removeSearch,
                     onHistoryClear = viewModel::clearSearchHistory,
