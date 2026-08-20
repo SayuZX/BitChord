@@ -25,7 +25,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Notes
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.rounded.Animation
 import androidx.compose.material.icons.rounded.BlurOff
 import androidx.compose.material.icons.rounded.Brightness4
 import androidx.compose.material.icons.rounded.Check
@@ -34,6 +36,7 @@ import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.MotionPhotosOff
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.SignalCellularAlt
@@ -111,6 +114,7 @@ fun SettingsScreen(
     onSignIn: () -> Unit,
     onSignOut: () -> Unit,
     onAccountScrobbling: () -> Unit,
+    onLyricsSources: () -> Unit,
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
 ) {
@@ -127,6 +131,9 @@ fun SettingsScreen(
     val nerdStats by AppSettings.showNerdStats.collectAsStateWithLifecycle()
     val reduceAnimation by AppSettings.reduceAnimation.collectAsStateWithLifecycle()
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
+    val animatedCanvas by AppSettings.animatedCanvas.collectAsStateWithLifecycle()
+    val syncedLyrics by AppSettings.syncedLyrics.collectAsStateWithLifecycle()
+    val lyricsSources by AppSettings.lyricsSources.collectAsStateWithLifecycle()
     val speed by AppSettings.playbackSpeed.collectAsStateWithLifecycle()
     val theme by AppSettings.themeMode.collectAsStateWithLifecycle()
     val sessionId by AppSettings.audioSessionId.collectAsStateWithLifecycle()
@@ -347,6 +354,57 @@ fun SettingsScreen(
                 },
                 onClick = { AppSettings.setReduceDynamicBlur(!reduceDynamicBlur) },
             )
+            RowDivider()
+            SettingsRow(
+                icon = Icons.Rounded.Animation,
+                title = "Animated cover art",
+                subtitle = "Plays the looping video some releases ship instead " +
+                    "of a still sleeve",
+                trailing = {
+                    Switch(
+                        checked = animatedCanvas,
+                        onCheckedChange = AppSettings::setAnimatedCanvas,
+                        colors = SwitchDefaults.colors(
+                            checkedTrackColor = MaterialTheme.colorScheme.primary,
+                            checkedBorderColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    )
+                },
+                onClick = { AppSettings.setAnimatedCanvas(!animatedCanvas) },
+            )
+            RowDivider()
+            SettingsRow(
+                icon = Icons.AutoMirrored.Rounded.Notes,
+                title = "Synced lyrics",
+                subtitle = "Lights up the words on the player as they're sung",
+                trailing = {
+                    Switch(
+                        checked = syncedLyrics,
+                        onCheckedChange = AppSettings::setSyncedLyrics,
+                        colors = SwitchDefaults.colors(
+                            checkedTrackColor = MaterialTheme.colorScheme.primary,
+                            checkedBorderColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    )
+                },
+                onClick = { AppSettings.setSyncedLyrics(!syncedLyrics) },
+            )
+            // Nothing to choose between while the feature is off, and the
+            // sources are third-party services being reached on the user's
+            // connection — which is the part worth being able to narrow.
+            if (syncedLyrics) {
+                RowDivider()
+                SettingsRow(
+                    icon = Icons.Rounded.Language,
+                    title = "Lyrics sources",
+                    subtitle = lyricsSources
+                        .sortedBy { it.ordinal }
+                        .joinToString(", ") { it.label }
+                        .ifEmpty { "None — no lyrics will be fetched" },
+                    trailing = { Chevron() },
+                    onClick = onLyricsSources,
+                )
+            }
         }
 
         val cacheLimitMb = (cacheLimitBytes / (1024 * 1024)).toInt()

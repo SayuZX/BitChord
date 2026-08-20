@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import com.music.bitchord.data.lyrics.LyricsSource
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
@@ -79,6 +80,29 @@ object AppSettings {
     /** Drops haze blur (status bar, mini player, bottom fade, lyrics focus) for a solid-fill look. */
     val reduceDynamicBlur = MutableStateFlow(false)
 
+    /**
+     * Plays a looping video behind the cover art on the player when one is
+     * published for the track — Spotify's Canvas, Apple's motion artwork.
+     *
+     * Costs a video stream on top of the audio one and reaches three
+     * services that have nothing to do with playback, so it stays a switch —
+     * but it is the better default, and most tracks resolve to no canvas at
+     * all. See [CanvasRepository][com.music.bitchord.data.canvas.CanvasRepository].
+     */
+    val animatedCanvas = MutableStateFlow(true)
+
+    /**
+     * Time-synced lyrics on the player, lit up as they are sung.
+     *
+     * On by default — it is most of the point of the player screen — but it
+     * reaches third-party lyric databases for every track played, so it stays
+     * a switch, and [lyricsSources] narrows which of them get asked.
+     */
+    val syncedLyrics = MutableStateFlow(true)
+
+    /** The databases [syncedLyrics] may ask. Empty is the same as off. */
+    val lyricsSources = MutableStateFlow(LyricsSource.entries.toSet())
+
     /** Disk budget for cached audio. [AudioCache][com.music.bitchord.playback.AudioCache] evicts past it. */
     val audioCacheLimitBytes = MutableStateFlow(DEFAULT_CACHE_LIMIT_BYTES)
 
@@ -125,6 +149,9 @@ object AppSettings {
         showNerdStats.value = prefs.getBoolean(KEY_NERD_STATS, false)
         reduceAnimation.value = prefs.getBoolean(KEY_REDUCE_ANIMATION, false)
         reduceDynamicBlur.value = prefs.getBoolean(KEY_REDUCE_BLUR, false)
+        animatedCanvas.value = prefs.getBoolean(KEY_ANIMATED_CANVAS, true)
+        syncedLyrics.value = prefs.getBoolean(KEY_SYNCED_LYRICS, true)
+        lyricsSources.value = readLyricsSources()
         audioCacheLimitBytes.value = prefs.getLong(KEY_CACHE_LIMIT, DEFAULT_CACHE_LIMIT_BYTES)
             .coerceIn(DEFAULT_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES)
         lastfmEnabled.value = prefs.getBoolean(KEY_LASTFM_ENABLED, false)
@@ -245,6 +272,36 @@ object AppSettings {
         prefs.edit().putBoolean(KEY_REDUCE_BLUR, value).apply()
     }
 
+    fun setSyncedLyrics(value: Boolean) {
+        syncedLyrics.value = value
+        prefs.edit().putBoolean(KEY_SYNCED_LYRICS, value).apply()
+    }
+
+    fun setLyricsSources(value: Set<LyricsSource>) {
+        lyricsSources.value = value
+        prefs.edit().putString(KEY_LYRICS_SOURCES, value.joinToString(",") { it.name }).apply()
+    }
+
+    /**
+     * Stored as a joined list of names rather than a string set: a name that
+     * no longer exists — a source dropped in a later build — has to fall out
+     * quietly, and the default when nothing has been saved is "all of them",
+     * which a missing key and an empty set would otherwise be unable to tell
+     * apart.
+     */
+    private fun readLyricsSources(): Set<LyricsSource> {
+        val stored = prefs.getString(KEY_LYRICS_SOURCES, null)
+            ?: return LyricsSource.entries.toSet()
+        return stored.split(",")
+            .mapNotNull { name -> LyricsSource.entries.firstOrNull { it.name == name } }
+            .toSet()
+    }
+
+    fun setAnimatedCanvas(value: Boolean) {
+        animatedCanvas.value = value
+        prefs.edit().putBoolean(KEY_ANIMATED_CANVAS, value).apply()
+    }
+
     /** Clamped to [DEFAULT_CACHE_LIMIT_BYTES]..[MAX_CACHE_LIMIT_BYTES] — the floor is the default, not zero. */
     fun setAudioCacheLimitBytes(value: Long) {
         val clamped = value.coerceIn(DEFAULT_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES)
@@ -333,6 +390,9 @@ object AppSettings {
     private const val KEY_CACHE_LIMIT = "audio_cache_limit_bytes"
     private const val KEY_REDUCE_ANIMATION = "reduce_animation"
     private const val KEY_REDUCE_BLUR = "reduce_dynamic_blur"
+    private const val KEY_ANIMATED_CANVAS = "animated_canvas"
+    private const val KEY_SYNCED_LYRICS = "synced_lyrics"
+    private const val KEY_LYRICS_SOURCES = "lyrics_sources"
 
     private const val KEY_LASTFM_ENABLED = "lastfm_enabled"
     private const val KEY_LASTFM_USERNAME = "lastfm_username"

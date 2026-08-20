@@ -104,6 +104,7 @@ import com.music.bitchord.ui.components.LastfmLoginAlert
 import com.music.bitchord.ui.components.ListenBrainzTokenAlert
 import com.music.bitchord.ui.components.MiniPlayer
 import com.music.bitchord.ui.components.TopFadeBlur
+import com.music.bitchord.ui.components.LyricsSourcesDialog
 import com.music.bitchord.ui.components.UpdateAvailableDialog
 import com.music.bitchord.ui.icons.BitChordIcons
 import androidx.media3.common.Player
@@ -151,6 +152,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     var showLogin by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showAccountScrobbling by remember { mutableStateOf(false) }
+    var showLyricsSources by remember { mutableStateOf(false) }
     var showListenBrainzLogin by remember { mutableStateOf(false) }
     var showLastfmLogin by remember { mutableStateOf(false) }
     var songActions by remember { mutableStateOf<Song?>(null) }
@@ -214,6 +216,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     val signedIn by viewModel.signedIn.collectAsStateWithLifecycle()
     val account by viewModel.account.collectAsStateWithLifecycle()
     val lyrics by viewModel.lyrics.collectAsStateWithLifecycle()
+    val lyricsSource by viewModel.lyricsSource.collectAsStateWithLifecycle()
     val lyricsChecked by viewModel.lyricsChecked.collectAsStateWithLifecycle()
     val searchHistory by viewModel.searchHistory.collectAsStateWithLifecycle()
     val detailStack by viewModel.detailStack.collectAsStateWithLifecycle()
@@ -264,8 +267,14 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
     }
 
     // Lyrics follow whatever is playing; duration lands a beat after the track.
-    LaunchedEffect(player.song?.videoId, player.durationMs) {
-        player.song?.let { viewModel.loadLyrics(it.videoId, it.title, it.artist, player.durationMs) }
+    // Keyed on the lyric settings too, so turning a source on or off applies to
+    // the track already playing rather than only the next one.
+    val syncedLyricsEnabled by AppSettings.syncedLyrics.collectAsStateWithLifecycle()
+    val lyricsSources by AppSettings.lyricsSources.collectAsStateWithLifecycle()
+    LaunchedEffect(player.song?.videoId, player.durationMs, syncedLyricsEnabled, lyricsSources) {
+        player.song?.let {
+            viewModel.loadLyrics(it.videoId, it.title, it.artist, player.durationMs, it.albumName)
+        }
     }
 
     val homeListState = rememberLazyListState()
@@ -585,6 +594,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                     },
                     onSignOut = { viewModel.signOut() },
                     onAccountScrobbling = { showAccountScrobbling = true },
+                    onLyricsSources = { showLyricsSources = true },
                     contentPadding = listPadding,
                 )
             } else if (page != null) {
@@ -989,6 +999,7 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                         viewModel.openDetail(id, song.artist, "Artist", null, BrowseType.ARTIST)
                     },
                     lyrics = lyrics,
+                    lyricsSource = lyricsSource,
                     lyricsUnavailable = lyricsChecked && lyrics.isNullOrEmpty(),
                     onClearQueue = {
                         // Keep what's playing; drop everything queued after it.
@@ -1194,6 +1205,14 @@ private fun BitChordApp(darkTheme: Boolean, viewModel: MainViewModel = viewModel
                     },
                 )
             }
+        }
+
+        if (showLyricsSources) {
+            BackHandler { showLyricsSources = false }
+            LyricsSourcesDialog(
+                hazeState = hazeState,
+                onDismiss = { showLyricsSources = false },
+            )
         }
 
         if (showListenBrainzLogin) {

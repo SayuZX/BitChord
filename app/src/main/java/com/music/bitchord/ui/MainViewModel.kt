@@ -7,8 +7,10 @@ import com.music.bitchord.auth.AuthStore
 import com.music.bitchord.data.AppUpdateChecker
 import com.music.bitchord.data.LocalMediaRepository
 import com.music.bitchord.data.YtMusicRepository
-import com.music.bitchord.data.lyrics.LrcLib
 import com.music.bitchord.data.lyrics.LyricLine
+import com.music.bitchord.data.lyrics.LyricsRepository
+import com.music.bitchord.data.lyrics.LyricsSource
+import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.innertube.Innertube
 import com.music.bitchord.data.innertube.PlaybackTracker
 import com.music.bitchord.data.innertube.StreamResolver
@@ -112,6 +114,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _lyrics = MutableStateFlow<List<LyricLine>?>(null)
     val lyrics: StateFlow<List<LyricLine>?> = _lyrics.asStateFlow()
 
+    /** Which of the four databases [lyrics] came from, for the panel's credit. */
+    private val _lyricsSource = MutableStateFlow<LyricsSource?>(null)
+    val lyricsSource: StateFlow<LyricsSource?> = _lyricsSource.asStateFlow()
+
     /**
      * Whether the lookup for the current track has finished. [lyrics] alone
      * can't tell "still looking" apart from "looked, found nothing" — both
@@ -122,22 +128,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val lyricsChecked: StateFlow<Boolean> = _lyricsChecked.asStateFlow()
 
     private var lyricsJob: Job? = null
-    private var lyricsFor: String? = null
+
+    /**
+     * What the loaded lyrics are for. Both the track *and* the settings that
+     * chose them, so switching a source on or off re-runs the lookup rather
+     * than leaving the last answer sitting on a player that would now find a
+     * different one.
+     */
+    private var lyricsFor: Pair<String, Set<LyricsSource>>? = null
 
     /** Called as the playing track changes; cheap no-op when already loaded. */
-    fun loadLyrics(videoId: String, title: String, artist: String, durationMs: Long) {
-        if (lyricsFor == videoId) return
-        lyricsFor = videoId
+    fun loadLyrics(
+        videoId: String,
+        title: String,
+        artist: String,
+        durationMs: Long,
+        album: String? = null,
+    ) {
+        val sources = if (AppSettings.syncedLyrics.value) {
+            AppSettings.lyricsSources.value
+        } else {
+            emptySet()
+        }
+        val key = videoId to sources
+        if (lyricsFor == key) return
+        lyricsFor = key
         _lyrics.value = null
-        _lyricsChecked.value = false
+        _lyricsSource.value = null
         lyricsJob?.cancel()
+        if (sources.isEmpty()) {
+            // Switched off, or every source unticked. Nothing to look up, and
+            // nothing to say about it — the player drops the lyric strip
+            // rather than reporting a track with no lyrics.
+            _lyricsChecked.value = true
+            return
+        }
+        _lyricsChecked.value = false
         if (durationMs <= 0L) {
             // Duration arrives a beat after the track does; wait for it.
             lyricsFor = null
             return
         }
         lyricsJob = viewModelScope.launch {
-            _lyrics.value = LrcLib.lyrics(title, artist, durationMs)
+            val found =
+                LyricsRepository.lyrics(videoId, title, artist, durationMs, album, sources)
+            _lyrics.value = found?.lines
+            _lyricsSource.value = found?.source
             _lyricsChecked.value = true
         }
     }
