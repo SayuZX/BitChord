@@ -45,6 +45,9 @@ object LastPlayed {
                     it.fromAutoplay,
                     it.localUri,
                     it.localPath,
+                    it.localLyricsUri,
+                    it.localLyricsSource,
+                    it.localLyricsFormat,
                     it.durationText,
                 )
             },
@@ -74,6 +77,9 @@ object LastPlayed {
                     fromAutoplay = it.auto,
                     localUri = it.local,
                     localPath = it.path,
+                    localLyricsUri = it.lyricsUri,
+                    localLyricsSource = it.lyricsSource,
+                    localLyricsFormat = it.lyricsFormat,
                 )
             },
             index = stored.index.coerceIn(0, stored.tracks.lastIndex),
@@ -98,6 +104,9 @@ object LastPlayed {
          */
         val local: String? = null,
         val path: String? = null,
+        val lyricsUri: String? = null,
+        val lyricsSource: String? = null,
+        val lyricsFormat: String? = null,
         /**
          * How long the track runs, as the row that queued it said.
          *

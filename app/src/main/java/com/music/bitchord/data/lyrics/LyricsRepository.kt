@@ -27,8 +27,30 @@ import kotlinx.coroutines.coroutineScope
  */
 object LyricsRepository {
 
-    /** Lyrics, and which of the four they turned out to come from. */
-    data class Result(val source: LyricsSource, val lines: List<LyricLine>)
+    /** Parses a persisted sidecar back into the same result the player uses. */
+    fun offline(
+        content: String,
+        format: LyricsArtifactFormat,
+        source: LyricsSource = LyricsSource.LRCLIB,
+    ): Result? {
+        val lines = when (format) {
+            LyricsArtifactFormat.TTML -> TtmlLyrics.parse(content)
+            LyricsArtifactFormat.ENHANCED_LRC -> EnhancedLrc.parse(content)
+            LyricsArtifactFormat.LRC -> LrcLib.parseLrc(content)
+        }.takeIf { it.isNotEmpty() } ?: return null
+        return Result(
+            source = source,
+            lines = lines,
+            artifact = LyricsArtifact(source, format, content, lines),
+        )
+    }
+
+    /** Lyrics, their source, and the representation that can be persisted. */
+    data class Result(
+        val source: LyricsSource,
+        val lines: List<LyricLine>,
+        val artifact: LyricsArtifact? = null,
+    )
 
     /**
      * [sources] is the user's pick from Settings; anything not in it is not
@@ -43,23 +65,23 @@ object LyricsRepository {
         album: String? = null,
         sources: Set<LyricsSource> = LyricsSource.entries.toSet(),
     ): Result? = coroutineScope {
-        val racing: List<Pair<LyricsSource, Deferred<List<LyricLine>?>>> = buildList {
+        val racing: List<Pair<LyricsSource, Deferred<LyricsArtifact?>>> = buildList {
             if (LyricsSource.BETTER_LYRICS in sources) {
                 add(
                     LyricsSource.BETTER_LYRICS to
-                        async(Dispatchers.IO) { BetterLyrics.lyrics(title, artist, durationMs, album) },
+                        async(Dispatchers.IO) { BetterLyrics.artifact(title, artist, durationMs, album) },
                 )
             }
             if (LyricsSource.LYRICS_PLUS in sources) {
                 add(
                     LyricsSource.LYRICS_PLUS to
-                        async(Dispatchers.IO) { LyricsPlus.lyrics(title, artist, durationMs, album) },
+                        async(Dispatchers.IO) { LyricsPlus.artifact(title, artist, durationMs, album) },
                 )
             }
             if (LyricsSource.SIMP_MUSIC in sources) {
                 add(
                     LyricsSource.SIMP_MUSIC to
-                        async(Dispatchers.IO) { SimpMusicLyrics.lyrics(videoId, durationMs) },
+                        async(Dispatchers.IO) { SimpMusicLyrics.artifact(videoId, durationMs) },
                 )
             }
         }
@@ -67,12 +89,24 @@ object LyricsRepository {
         try {
             var lineSynced: Result? = null
             for ((source, job) in racing) {
-                val lines = runCatching { job.await() }.getOrNull() ?: continue
-                if (lines.any { it.isWordSynced }) return@coroutineScope Result(source, lines)
-                if (lineSynced == null) lineSynced = Result(source, lines)
+                val artifact = try {
+                    job.await()
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                } ?: continue
+                if (artifact.lines.any { it.isWordSynced }) {
+                    return@coroutineScope Result(source, artifact.lines, artifact)
+                }
+                if (lineSynced == null) {
+                    lineSynced = Result(source, artifact.lines, artifact)
+                }
             }
             lineSynced ?: if (LyricsSource.LRCLIB in sources) {
-                LrcLib.lyrics(title, artist, durationMs)?.let { Result(LyricsSource.LRCLIB, it) }
+                LrcLib.artifact(title, artist, durationMs)?.let {
+                    Result(LyricsSource.LRCLIB, it.lines, it)
+                }
             } else {
                 null
             }

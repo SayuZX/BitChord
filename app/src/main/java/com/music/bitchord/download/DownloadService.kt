@@ -89,16 +89,14 @@ class DownloadService : Service() {
      */
     private suspend fun drainQueue() {
         while (true) {
-            val song = Downloads.takeNext() ?: break
-            current = song
+            val task = Downloads.takeNext() ?: break
+            current = task.song
             postNotification()
 
             // Its own job, so one track can be cancelled out from under the
             // loop without taking the rest of the queue with it.
-            val job = scope.launch { Downloads.run(this@DownloadService, song) }
-            Downloads.onRunning(song.videoId, job)
+            val job = scope.launch { Downloads.run(this@DownloadService, task) }
             job.join()
-            Downloads.onIdle()
         }
         current = null
     }
@@ -122,7 +120,6 @@ class DownloadService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
-        Downloads.onIdle()
         super.onDestroy()
     }
 
