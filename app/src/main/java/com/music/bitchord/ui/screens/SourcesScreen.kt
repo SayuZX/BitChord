@@ -49,6 +49,7 @@ import com.music.bitchord.data.sources.SourceRegistry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 /**
  * Where the app is allowed to get audio from.
@@ -122,18 +123,20 @@ fun SourcesScreen(
                         "and tracks it holds a lossless rendition of will play as the file itself " +
                         "rather than as a transcode."
                 cappedByQuality ->
-                    "Currently overridden: the quality ceiling for this connection is set below " +
-                        "High, and that budget wins. Tracks are being transcoded."
+                    "Currently overridden for playback: the quality ceiling for this connection " +
+                        "is set below High, and that budget wins. Tracks are being transcoded. " +
+                        "Downloads are unaffected — they keep whatever Settings › Downloads asks for."
                 else ->
                     "Asks the module source for the file it holds instead of a transcode of it. " +
                         "Costs considerably more data than High, and does nothing when it has no " +
-                        "lossless rendition to give."
+                        "lossless rendition to give. Applies to playback; what a saved file keeps " +
+                        "is set by Download quality in Settings."
             },
         ) {
             SettingsRow(
                 icon = Icons.Rounded.GraphicEq,
                 title = "Prefer lossless",
-                subtitle = "FLAC and ALAC straight from the source",
+                subtitle = "FLAC and ALAC straight from the source, while playing",
                 badge = "Overridden".takeIf { lossless && cappedByQuality },
                 trailing = {
                     Switch(
@@ -331,7 +334,7 @@ private fun ServerEditorDialog(
 
     AlertDialog(
         onDismissRequest = { if (!testing) onDismiss() },
-        title = { Text(if (isNew) "Add ${config.kind.label.lowercase()}" else config.displayName) },
+        title = { Text(if (isNew) "Add ${config.kind.label.lowercase(Locale.ROOT)}" else config.displayName) },
         text = {
             Column {
                 OutlinedTextField(

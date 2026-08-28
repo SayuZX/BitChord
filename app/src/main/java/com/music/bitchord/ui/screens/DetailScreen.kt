@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -29,6 +30,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -48,7 +50,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -76,7 +77,10 @@ import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.model.UiState
 import com.music.bitchord.data.model.artworkAt
 import com.music.bitchord.data.settings.AppSettings
+import com.music.bitchord.download.DownloadState
+import com.music.bitchord.download.Downloads
 import com.music.bitchord.ui.components.ArtworkWash
+import com.music.bitchord.ui.components.DownloadedBadge
 import com.music.bitchord.ui.components.MessageState
 import com.music.bitchord.ui.components.PAGE_GUTTER
 import com.music.bitchord.ui.components.ROW_DIVIDER_INSET
@@ -84,11 +88,14 @@ import com.music.bitchord.ui.components.SHELF_CARD_WIDTH
 import com.music.bitchord.ui.components.SongRow
 import com.music.bitchord.ui.components.thumbnailBorder
 import com.music.bitchord.ui.components.detailSkeleton
+import com.music.bitchord.ui.haptics.Haptic
+import com.music.bitchord.ui.haptics.rememberHaptics
 import com.music.bitchord.ui.icons.BitChordIcons
 import com.music.bitchord.ui.player.CanvasArtworkPlayer
 import com.music.bitchord.ui.theme.ArtworkPalette
 import com.music.bitchord.ui.theme.rememberArtworkPalette
 import kotlin.math.roundToInt
+import java.util.Locale
 
 private const val MAX_ARTIST_SONGS = 20
 private const val SONGS_PER_COLUMN = 4
@@ -138,8 +145,8 @@ private val HEADER_DROP = 44.dp
  * that have been made to *resemble* each other, and the eye finds that edge
  * every time. A single blur that samples across the join has no edge to find:
  * the picture, the colour under it and the colour under the song rows are all
- * one smear of the same glass. It is the same thing [BottomFadeBlur] does to
- * the foot of the screen, pointed at the middle of this one.
+ * one smear of the same glass. It is the same thing [TopFadeBlur] does to the
+ * head of the screen, pointed at the middle of this one.
  */
 @Composable
 fun DetailScreen(
@@ -156,6 +163,24 @@ fun DetailScreen(
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
     /**
+     * Holding one of the album cards on an artist page — the same menu the
+     * shelves on every other tab open, so a release can be queued from
+     * wherever it is seen rather than only from its own page.
+     */
+    onSectionItemLongPress: ((ShelfItem) -> Unit)? = null,
+    /**
+     * The header's overflow: everything this page can do to its whole track
+     * list that isn't already one of the buttons beside it — see
+     * [com.music.bitchord.ui.components.BrowseActionsSheet]. Null on the pages
+     * with no list to act on.
+     *
+     * The second argument is whether the sheet should open with "Delete
+     * download" already armed — true only when the header's own download
+     * circle was the thing tapped, because by then it's showing a tick and a
+     * tap on a tick means "take it off the device", not "show me the menu".
+     */
+    onMore: ((List<Song>, Boolean) -> Unit)? = null,
+    /**
      * Saves this release to the account's library, or takes it out —
      * [DetailPage.library] says which way round. Null hides the control
      * entirely, which is the answer for a guest and for the pages YouTube never
@@ -167,6 +192,12 @@ fun DetailScreen(
     val songs = (page.songs as? UiState.Success)?.data.orEmpty()
     val isArtist = page.type == BrowseType.ARTIST
     val palette = rememberArtworkPalette(page.thumbnailUrl)
+
+    // What marks a row as already downloaded, tinted from the sleeve like the
+    // rest of the page. Null on any page that is itself a reading of this
+    // device — the Downloads folder, one downloaded playlist — where every row
+    // qualifies and the badge would be decoration rather than information.
+    val downloadedTint = palette.accent.takeUnless { page.browseId.startsWith("local:") }
 
     // Animated cover art on the header, the same feature the player has.
     // Albums only: a playlist's artwork is a collage and an artist page's is a
@@ -191,13 +222,19 @@ fun DetailScreen(
     }
 
     val pageHaze = remember { HazeState() }
-    // The artwork is drawn behind the list rather than in it, so both need to
-    // agree on its height without being able to ask each other. The width is
-    // the screen's, so the ratio decides it and both can work it out alone.
-    val artHeight = LocalConfiguration.current.screenWidthDp.dp /
-        if (isArtist) ARTIST_PHOTO_RATIO else SLEEVE_RATIO
 
-    Box(modifier.fillMaxSize()) {
+    BoxWithConstraints(modifier.fillMaxSize()) {
+        // The artwork is drawn behind the list rather than in it, so both need
+        // to agree on its height without being able to ask each other. The
+        // width is the page's, so the ratio decides it and both can work it out
+        // alone.
+        //
+        // Measured rather than read off the window, because the two are not the
+        // same number everywhere: on a tablet the page is the column left over
+        // once the player has its pane, and a height derived from the whole
+        // window there is a sleeve half again as tall as it is wide.
+        val artHeight = maxWidth / if (isArtist) ARTIST_PHOTO_RATIO else SLEEVE_RATIO
+
         PageBackground(
             page = page,
             palette = palette,
@@ -237,6 +274,7 @@ fun DetailScreen(
                         // A page of on-device tracks has nothing further away
                         // to fetch — everything on it is already local.
                         onDownload = onDownloadAll.takeUnless { page.browseId.startsWith("local:") },
+                        onMore = onMore,
                         onArtistClick = onArtistClick,
                         onToggleLibrary = onToggleLibrary,
                     )
@@ -274,6 +312,7 @@ fun DetailScreen(
                                             palette = palette,
                                             onClick = { onSongClick(top, top.indexOf(song)) },
                                             onLongPress = { onSongLongPress(song) },
+                                            downloadedTint = downloadedTint,
                                         )
                                     }
                                 }
@@ -298,6 +337,7 @@ fun DetailScreen(
                             rowBackground = Color.Transparent,
                             trackNumber = (index + 1).takeIf { numbered },
                             subtitleColor = palette.onBackgroundVariant,
+                            downloadedTint = downloadedTint,
                         )
                         if (index < state.data.lastIndex) {
                             HorizontalDivider(
@@ -326,6 +366,7 @@ fun DetailScreen(
                         onClick = { onSongClick(page.suggestedSongs, index) },
                         onLongPress = { onSongLongPress(song) },
                         onAdd = { onAddSuggested(song) },
+                        downloadedTint = downloadedTint,
                     )
                     if (index < page.suggestedSongs.lastIndex) {
                         HorizontalDivider(
@@ -350,6 +391,7 @@ fun DetailScreen(
                                 item = item,
                                 palette = palette,
                                 onClick = { onSectionItemClick(item) },
+                                onLongPress = onSectionItemLongPress?.let { { it(item) } },
                             )
                         }
                     }
@@ -378,6 +420,7 @@ private fun ReleaseHeader(
     onPlay: () -> Unit,
     onShuffle: () -> Unit,
     onDownload: ((List<Song>) -> Unit)?,
+    onMore: ((List<Song>, Boolean) -> Unit)?,
     onArtistClick: (String, String) -> Unit,
     onToggleLibrary: (() -> Unit)?,
 ) {
@@ -453,12 +496,23 @@ private fun ReleaseHeader(
                 // Only where YouTube said the release can be saved and the
                 // caller is willing to take the write — see [onToggleLibrary].
                 val library = page.library?.takeIf { onToggleLibrary != null }
+                // Four circles and the pill is as much as this row can carry,
+                // and on a 360dp screen it only carries it by giving something
+                // up: the pill sheds padding first, being the widest thing here,
+                // and the circles come down 4dp after that. The alternative is a
+                // row that runs off the edge of the screen.
+                val circles = listOfNotNull(library, onDownload, onMore).size + 1 // + Shuffle
+                val full = circles >= 4
+                val circleSize = if (full) 46.dp else 50.dp
                 Spacer(Modifier.height(14.dp))
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = HEADER_GUTTER),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                    horizontalArrangement = Arrangement.spacedBy(
+                        if (full) 8.dp else 10.dp,
+                        Alignment.CenterHorizontally,
+                    ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (library != null) {
@@ -473,6 +527,8 @@ private fun ReleaseHeader(
                             },
                             palette = palette,
                             onClick = { onToggleLibrary?.invoke() },
+                            haptic = if (library.saved) Haptic.ToggleOff else Haptic.ToggleOn,
+                            size = circleSize,
                         )
                     }
                     CircleIconButton(
@@ -480,22 +536,74 @@ private fun ReleaseHeader(
                         contentDescription = "Shuffle",
                         palette = palette,
                         onClick = onShuffle,
+                        haptic = Haptic.Resume,
+                        size = circleSize,
                     )
                     PlayPill(
                         palette = palette,
                         onClick = onPlay,
-                        // The pill is the widest thing in the row and the first
-                        // to be squeezed when a third circle joins it, so it
-                        // gives up padding rather than letting the row run off
-                        // the edge of a narrow screen.
-                        horizontalPadding = if (library != null && onDownload != null) 24.dp else 32.dp,
+                        horizontalPadding = when (circles) {
+                            1, 2 -> 32.dp
+                            3 -> 24.dp
+                            else -> 14.dp
+                        },
                     )
                     onDownload?.let { download ->
+                        // The queue is one queue for the whole app, so this asks
+                        // only about tracks *this page* asked to be downloaded —
+                        // not merely tracks it happens to contain. Two releases
+                        // can share a track (a song on both a playlist and an
+                        // album), and scanning the whole queue for any id this
+                        // page's songs carry would show this button waiting on a
+                        // download some other release started. Failed entries
+                        // stay in [Downloads.active] until dismissed, and a
+                        // failure is not a wait.
+                        val active by Downloads.active.collectAsStateWithLifecycle()
+                        val requested by Downloads.requested.collectAsStateWithLifecycle()
+                        val requestedIds = requested[page.browseId].orEmpty()
+                        // Same source [DownloadedBadge] reads per row — a release
+                        // counts as downloaded once every one of its own tracks is
+                        // in the saved set, not from any record of the release
+                        // itself.
+                        val saved by Downloads.saved.collectAsStateWithLifecycle()
+                        val ids = remember(songs) { songs.mapTo(HashSet()) { it.videoId } }
+                        val waiting = requestedIds.any { id ->
+                            when (active[id]) {
+                                is DownloadState.Queued, is DownloadState.Running -> true
+                                else -> false
+                            }
+                        }
+                        val downloaded = !waiting && ids.isNotEmpty() && ids.all { it in saved }
                         CircleIconButton(
-                            icon = BitChordIcons.Download,
-                            contentDescription = "Download all",
+                            icon = when {
+                                waiting -> BitChordIcons.Clock
+                                downloaded -> BitChordIcons.Check
+                                else -> BitChordIcons.Download
+                            },
+                            contentDescription = when {
+                                waiting -> "Downloading"
+                                downloaded -> "Downloaded"
+                                else -> "Download all"
+                            },
                             palette = palette,
-                            onClick = { download(songs) },
+                            onClick = {
+                                // A tick means the release is already on the
+                                // device — a second tap on "Download" would do
+                                // nothing (everything is filtered out before the
+                                // queue), so it opens the overflow with "Delete
+                                // download" already armed instead.
+                                if (downloaded) onMore?.invoke(songs, true) else download(songs)
+                            },
+                            size = circleSize,
+                        )
+                    }
+                    onMore?.let { more ->
+                        CircleIconButton(
+                            icon = Icons.Rounded.MoreHoriz,
+                            contentDescription = "More",
+                            palette = palette,
+                            onClick = { more(songs, false) },
+                            size = circleSize,
                         )
                     }
                 }
@@ -748,6 +856,7 @@ private fun ActionRow(palette: ArtworkPalette, onPlay: () -> Unit, onShuffle: ()
             contentDescription = "Shuffle",
             palette = palette,
             onClick = onShuffle,
+            haptic = Haptic.Resume,
         )
 
         PlayPill(
@@ -769,13 +878,19 @@ private fun PlayPill(
     modifier: Modifier = Modifier,
     horizontalPadding: Dp = 32.dp,
 ) {
+    // Resume rather than a flat tap: this button starts a queue, and the rising
+    // pair says so.
+    val haptics = rememberHaptics()
     Row(
         modifier = modifier
             .height(50.dp)
             .clip(CircleShape)
             .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
             .border(0.5.dp, Color.White.copy(alpha = 0.10f), CircleShape)
-            .clickable(onClick = onClick)
+            .clickable {
+                haptics.play(Haptic.Resume)
+                onClick()
+            }
             .padding(horizontal = horizontalPadding),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
@@ -805,21 +920,27 @@ private fun CircleIconButton(
     contentDescription: String,
     palette: ArtworkPalette,
     onClick: () -> Unit,
+    haptic: Haptic = Haptic.Tap,
+    size: Dp = 50.dp,
 ) {
+    val haptics = rememberHaptics()
     Box(
         modifier = Modifier
-            .size(50.dp)
+            .size(size)
             .clip(CircleShape)
             .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
             .border(0.5.dp, Color.White.copy(alpha = 0.10f), CircleShape)
-            .clickable(onClick = onClick),
+            .clickable {
+                haptics.play(haptic)
+                onClick()
+            },
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
             tint = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.size(22.dp),
+            modifier = Modifier.size(size * 0.44f),
         )
     }
 }
@@ -856,6 +977,7 @@ private fun CompactSongRow(
     palette: ArtworkPalette,
     onClick: () -> Unit,
     onLongPress: () -> Unit,
+    downloadedTint: Color? = null,
 ) {
     Row(
         modifier = Modifier
@@ -890,6 +1012,9 @@ private fun CompactSongRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        if (downloadedTint != null) {
+            DownloadedBadge(song.videoId, downloadedTint)
+        }
         Box(
             modifier = Modifier
                 .size(36.dp)
@@ -921,6 +1046,7 @@ private fun SuggestedSongRow(
     onClick: () -> Unit,
     onLongPress: () -> Unit,
     onAdd: () -> Unit,
+    downloadedTint: Color? = null,
 ) {
     Row(
         modifier = Modifier
@@ -956,6 +1082,9 @@ private fun SuggestedSongRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        if (downloadedTint != null) {
+            DownloadedBadge(song.videoId, downloadedTint)
+        }
         Spacer(Modifier.width(8.dp))
         Box(
             modifier = Modifier
@@ -975,12 +1104,18 @@ private fun SuggestedSongRow(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SectionCard(item: ShelfItem, palette: ArtworkPalette, onClick: () -> Unit) {
+private fun SectionCard(
+    item: ShelfItem,
+    palette: ArtworkPalette,
+    onClick: () -> Unit,
+    onLongPress: (() -> Unit)? = null,
+) {
     Column(
         modifier = Modifier
             .width(SHELF_CARD_WIDTH)
-            .clickable(onClick = onClick),
+            .combinedClickable(onClick = onClick, onLongClick = onLongPress),
     ) {
         AsyncImage(
             model = item.thumbnailUrl.artworkAt(CARD_ART_PX),
@@ -1022,13 +1157,13 @@ private fun SectionCard(item: ShelfItem, palette: ArtworkPalette, onClick: () ->
 private fun DetailPage.headerLines(trackCount: Int): Pair<String, String> {
     val parts = subtitle.split("•", "·").map { it.trim() }.filter { it.isNotEmpty() }
     val year = parts.lastOrNull { it.length == 4 && it.all(Char::isDigit) }
-    val kind = parts.firstOrNull { it.lowercase() in KIND_WORDS }
+    val kind = parts.firstOrNull { it.lowercase(Locale.ROOT) in KIND_WORDS }
     val credit = parts.filter { it != year && it != kind }.joinToString(", ")
     val meta = listOfNotNull(
         kind ?: type.label,
         year,
         trackCount.takeIf { it > 0 }?.let { "$it ${if (it == 1) "song" else "songs"}" },
-    ).joinToString(" • ").uppercase()
+    ).joinToString(" • ").uppercase(Locale.ROOT)
     return credit to meta
 }
 

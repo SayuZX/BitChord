@@ -28,6 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Notes
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.Animation
+import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BlurOff
 import androidx.compose.material.icons.rounded.Brightness4
@@ -36,21 +37,28 @@ import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Dns
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.FileDownload
+import androidx.compose.material.icons.rounded.FileUpload
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.LocalOffer
 import androidx.compose.material.icons.rounded.MusicOff
 import androidx.compose.material.icons.rounded.MotionPhotosOff
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.SignalCellularAlt
+import androidx.compose.material.icons.rounded.SmartDisplay
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.SurroundSound
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.Waves
 import androidx.compose.material.icons.rounded.Wifi
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -88,8 +96,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.SingletonImageLoader
 import coil3.compose.AsyncImage
@@ -101,12 +109,14 @@ import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.sources.SourceKind
 import com.music.bitchord.data.sources.SourceRegistry
 import com.music.bitchord.data.settings.AudioQuality
+import com.music.bitchord.data.settings.DownloadQuality
 import com.music.bitchord.data.settings.ThemeMode
+import com.music.bitchord.data.stats.Backup
 import com.music.bitchord.playback.AudioCache
-import com.music.bitchord.playback.DolbyAtmos
 import com.music.bitchord.ui.player.fullBleedArtworkAvailable
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import java.util.Locale
 
 /**
  * Grouped settings, in the shape phones have taught people to expect: inset
@@ -118,11 +128,14 @@ import kotlin.math.roundToInt
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
+    /** The window's width, for the gates that depend on it. */
+    windowWidth: Dp,
     signedIn: Boolean,
     account: Account?,
     onSignIn: () -> Unit,
     onSignOut: () -> Unit,
     onAccountScrobbling: () -> Unit,
+    onOpenReplay: () -> Unit,
     onLyricsSources: () -> Unit,
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
@@ -136,23 +149,26 @@ fun SettingsScreen(
     val smartFade by AppSettings.smartFadeEnabled.collectAsStateWithLifecycle()
     val skipSilence by AppSettings.skipSilence.collectAsStateWithLifecycle()
     val spatialAudio by AppSettings.spatialAudio.collectAsStateWithLifecycle()
-    val atmosSupported by DolbyAtmos.supported.collectAsStateWithLifecycle()
-    val atmosEnabled by DolbyAtmos.enabledOnDevice.collectAsStateWithLifecycle()
     val nerdStats by AppSettings.showNerdStats.collectAsStateWithLifecycle()
     val reduceAnimation by AppSettings.reduceAnimation.collectAsStateWithLifecycle()
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
     val animatedCanvas by AppSettings.animatedCanvas.collectAsStateWithLifecycle()
+    val canvasOverCellular by AppSettings.canvasOverCellular.collectAsStateWithLifecycle()
     val fullBleedArtwork by AppSettings.fullBleedArtwork.collectAsStateWithLifecycle()
     val syncedLyrics by AppSettings.syncedLyrics.collectAsStateWithLifecycle()
     val lyricsSources by AppSettings.lyricsSources.collectAsStateWithLifecycle()
     val theme by AppSettings.themeMode.collectAsStateWithLifecycle()
     val sessionId by AppSettings.audioSessionId.collectAsStateWithLifecycle()
     val cacheLimitBytes by AppSettings.audioCacheLimitBytes.collectAsStateWithLifecycle()
+    val downloadQuality by AppSettings.downloadQuality.collectAsStateWithLifecycle()
+    val wifiOnlyDownloads by AppSettings.wifiOnlyDownloads.collectAsStateWithLifecycle()
     val sourceConfigs by SourceRegistry.configs.collectAsStateWithLifecycle()
     val lossless by AppSettings.losslessAudio.collectAsStateWithLifecycle()
     val stopOnTaskRemoved by AppSettings.stopOnTaskRemoved.collectAsStateWithLifecycle()
     val hideVolumeBar by AppSettings.hideVolumeBar.collectAsStateWithLifecycle()
     val swipeToPlayNext by AppSettings.swipeToPlayNext.collectAsStateWithLifecycle()
+    val dontRepeatSuggestions by AppSettings.dontRepeatSuggestions.collectAsStateWithLifecycle()
+    val convertVideoToAudio by AppSettings.convertVideoToAudio.collectAsStateWithLifecycle()
 
     // Whether the module index URL is baked into this build.
     val losslessConfigured = BuildConfig.MODULE_INDEX_URL.trim().isNotEmpty()
@@ -171,18 +187,53 @@ fun SettingsScreen(
     val listenBrainzEnabled by AppSettings.listenBrainzEnabled.collectAsStateWithLifecycle()
     val listenBrainzToken by AppSettings.listenBrainzToken.collectAsStateWithLifecycle()
 
+    val replayGenres by AppSettings.replayGenres.collectAsStateWithLifecycle()
+
     var picking by remember { mutableStateOf<QualityTarget?>(null) }
+    var pickingDownloadQuality by remember { mutableStateOf(false) }
+    // What the last export or import did, shown on the row that did it rather
+    // than as a toast: a backup is the one action here whose outcome nobody can
+    // check by looking at the app afterwards. Held per direction, or an import's
+    // result reports itself under the word "Export".
+    var exportStatus by remember { mutableStateOf<String?>(null) }
+    var importStatus by remember { mutableStateOf<String?>(null) }
+    var confirmImport by remember { mutableStateOf(false) }
+    val backupScope = rememberCoroutineScope()
+
+    /**
+     * Both halves go through the system document picker rather than a path of
+     * this app's own choosing. That is what puts the file somewhere the user can
+     * actually find it — Drive, Files, a folder they already back up — and it
+     * means neither direction needs a storage permission, since the grant
+     * arrives with the document they picked.
+     */
+    val exportPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json"),
+    ) { target ->
+        if (target == null) return@rememberLauncherForActivityResult
+        backupScope.launch {
+            exportStatus = Backup.exportTo(context, target).fold(
+                onSuccess = { months ->
+                    "Exported settings and ${countOfMonths(months)}"
+                },
+                onFailure = { "Export failed: ${it.message ?: "unknown error"}" },
+            )
+        }
+    }
+    val importPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { source ->
+        if (source == null) return@rememberLauncherForActivityResult
+        backupScope.launch {
+            importStatus = Backup.importFrom(context, source).fold(
+                onSuccess = { "Imported ${countOfMonths(it.months)} from v${it.from}" },
+                onFailure = { "Import failed: ${it.message ?: "unknown error"}" },
+            )
+        }
+    }
     var showListenBrainzTokenDialog by remember { mutableStateOf(false) }
     var showLastfmLoginDialog by remember { mutableStateOf(false) }
     val scrobbleScope = rememberCoroutineScope()
-
-    // Coming back from the system Atmos panel is the one moment the answer is
-    // most likely to have changed, and on devices whose Atmos switch isn't
-    // watchable it's the only moment we'd hear about it at all.
-    LifecycleResumeEffect(Unit) {
-        DolbyAtmos.refresh()
-        onPauseOrDispose {}
-    }
 
     val version = remember(context) {
         runCatching {
@@ -213,13 +264,7 @@ fun SettingsScreen(
             )
         }
 
-        SettingsGroup(
-            header = "Audio quality",
-            footer = "Each connection keeps its own ceiling, so Wi-Fi can stay on " +
-                "High while mobile data is capped. High costs about " +
-                "${AudioQuality.HIGH.hourly} of data. The ceiling applies to every " +
-                "source, and outranks the lossless preference.",
-        ) {
+        SettingsGroup(header = "Audio quality") {
             SettingsRow(
                 icon = Icons.Rounded.GraphicEq,
                 title = "Lossless / HQ Audio",
@@ -273,6 +318,30 @@ fun SettingsScreen(
                 badge = "In use".takeIf { metered == true },
                 value = cellularQuality.label,
                 onClick = { picking = QualityTarget.CELLULAR },
+            )
+        }
+
+        // Its own group rather than rows bolted onto the two above, because a
+        // download is not a third kind of connection. The ceilings answer "what
+        // does this minute cost"; these answer "what am I keeping, and when may
+        // it be fetched" — and those two questions only make sense read
+        // together, which is what puts them side by side here.
+        SettingsGroup(header = "Downloads") {
+            SettingsRow(
+                icon = Icons.Rounded.Download,
+                title = "Download quality",
+                subtitle = "${downloadQuality.perTrack} per track, whatever the connection",
+                value = downloadQuality.label,
+                onClick = { pickingDownloadQuality = true },
+            )
+            // Reads as part of Download quality above it, not as a setting
+            // of its own — same treatment as Play animated cover over
+            // cellular gets under Animated cover art.
+            SettingsSubRow(
+                title = "Download over Wi-Fi only",
+                checked = wifiOnlyDownloads,
+                onCheckedChange = AppSettings::setWifiOnlyDownloads,
+                badge = "Blocking".takeIf { wifiOnlyDownloads && metered == true },
             )
         }
 
@@ -334,33 +403,18 @@ fun SettingsScreen(
             SettingsRow(
                 icon = Icons.Rounded.SurroundSound,
                 title = "Spatial audio",
-                subtitle = when {
-                    !atmosSupported -> "Needs a device with Dolby Atmos"
-                    !atmosEnabled -> "Turn on Dolby Atmos to use it"
-                    else -> "Widens stereo tracks for a more immersive feel"
-                },
-                enabled = atmosSupported,
+                subtitle = "Widens stereo tracks for a more immersive feel",
                 trailing = {
                     Switch(
-                        checked = spatialAudio && atmosEnabled,
-                        onCheckedChange = { wanted ->
-                            if (atmosEnabled) AppSettings.setSpatialAudio(wanted) else openAtmosSettings(context)
-                        },
-                        enabled = atmosSupported,
+                        checked = spatialAudio,
+                        onCheckedChange = AppSettings::setSpatialAudio,
                         colors = SwitchDefaults.colors(
                             checkedTrackColor = MaterialTheme.colorScheme.primary,
                             checkedBorderColor = MaterialTheme.colorScheme.primary,
                         ),
                     )
                 },
-                // With Atmos off, the switch has nothing to switch — the row
-                // sends the user to the panel that does, and the state it comes
-                // back with is picked up on resume.
-                onClick = when {
-                    !atmosSupported -> null
-                    !atmosEnabled -> ({ openAtmosSettings(context) })
-                    else -> ({ AppSettings.setSpatialAudio(!spatialAudio) })
-                },
+                onClick = { AppSettings.setSpatialAudio(!spatialAudio) },
             )
             RowDivider()
             SettingsRow(
@@ -385,6 +439,23 @@ fun SettingsScreen(
                     )
                 },
                 onClick = { AppSettings.setShowNerdStats(!nerdStats) },
+            )
+            RowDivider()
+            SettingsRow(
+                icon = Icons.Rounded.SmartDisplay,
+                title = "Stop converting video songs to audio version",
+                subtitle = "Plays a music-video upload as itself instead of swapping it for its catalogue audio release",
+                trailing = {
+                    Switch(
+                        checked = !convertVideoToAudio,
+                        onCheckedChange = { AppSettings.setConvertVideoToAudio(!it) },
+                        colors = SwitchDefaults.colors(
+                            checkedTrackColor = MaterialTheme.colorScheme.primary,
+                            checkedBorderColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    )
+                },
+                onClick = { AppSettings.setConvertVideoToAudio(!convertVideoToAudio) },
             )
         }
 
@@ -431,9 +502,11 @@ fun SettingsScreen(
                 onClick = { AppSettings.setReduceDynamicBlur(!reduceDynamicBlur) },
             )
             RowDivider()
-            // Left out where the player won't honour it — a tablet is too wide
-            // for edge-to-edge artwork and keeps the sleeve either way.
-            if (fullBleedArtworkAvailable()) {
+            // Left out where the player won't honour it: a window too wide for
+            // the player to fill and too narrow to stand a page beside it keeps
+            // the sleeve either way. A docked pane is a phone's width, so it does
+            // honour it — see [fullBleedArtworkAvailable].
+            if (fullBleedArtworkAvailable(windowWidth)) {
                 SettingsRow(
                     icon = Icons.Rounded.Fullscreen,
                     title = "Full-screen cover art",
@@ -470,6 +543,18 @@ fun SettingsScreen(
                 },
                 onClick = { AppSettings.setAnimatedCanvas(!animatedCanvas) },
             )
+            // Reads as part of the Animated cover art option above it, not
+            // as a separate setting. Nothing to narrow while the clip itself
+            // is off. Defaults to off: a clip loops for as long as its track
+            // plays, so on cellular this is not a one-time video cost but
+            // that cost repeated on every loop — see AppSettings.canvasOverCellular.
+            if (animatedCanvas) {
+                SettingsSubRow(
+                    title = "Play animated cover over cellular",
+                    checked = canvasOverCellular,
+                    onCheckedChange = AppSettings::setCanvasOverCellular,
+                )
+            }
             RowDivider()
             SettingsRow(
                 icon = Icons.AutoMirrored.Rounded.Notes,
@@ -550,6 +635,50 @@ fun SettingsScreen(
             )
         }
 
+        SettingsGroup(header = "Your data") {
+            SettingsRow(
+                icon = Icons.Rounded.BarChart,
+                title = "Replay",
+                subtitle = "Your top songs, artists, albums and genres",
+                onClick = onOpenReplay,
+            )
+            RowDivider()
+            SettingsRow(
+                icon = Icons.Rounded.LocalOffer,
+                title = "Work out genres",
+                subtitle = if (replayGenres) {
+                    "Asks Last.fm what an artist plays — their name is sent, nothing else"
+                } else {
+                    "Replay's genre chart is hidden while this is off"
+                },
+                trailing = {
+                    Switch(
+                        checked = replayGenres,
+                        onCheckedChange = AppSettings::setReplayGenres,
+                        colors = SwitchDefaults.colors(
+                            checkedTrackColor = MaterialTheme.colorScheme.primary,
+                            checkedBorderColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    )
+                },
+                onClick = { AppSettings.setReplayGenres(!replayGenres) },
+            )
+            RowDivider()
+            SettingsRow(
+                icon = Icons.Rounded.FileUpload,
+                title = "Export data",
+                subtitle = exportStatus ?: "Settings and listening history, as one JSON file",
+                onClick = { exportPicker.launch(Backup.suggestedName()) },
+            )
+            RowDivider()
+            SettingsRow(
+                icon = Icons.Rounded.FileDownload,
+                title = "Import data",
+                subtitle = importStatus ?: "Replaces the settings and history on this device",
+                onClick = { confirmImport = true },
+            )
+        }
+
         SettingsGroup(
             header = "Miscellaneous",
             footer = "When enabled, closing the app from the recent apps screen will also stop music playback.",
@@ -573,6 +702,23 @@ fun SettingsScreen(
                     )
                 },
                 onClick = { AppSettings.setSwipeToPlayNext(!swipeToPlayNext) },
+            )
+            RowDivider()
+            SettingsRow(
+                icon = Icons.Rounded.History,
+                title = "Don't repeat songs in current session",
+                subtitle = "AutoPlay won't suggest a song already played or suggested this session",
+                trailing = {
+                    Switch(
+                        checked = dontRepeatSuggestions,
+                        onCheckedChange = AppSettings::setDontRepeatSuggestions,
+                        colors = SwitchDefaults.colors(
+                            checkedTrackColor = MaterialTheme.colorScheme.primary,
+                            checkedBorderColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    )
+                },
+                onClick = { AppSettings.setDontRepeatSuggestions(!dontRepeatSuggestions) },
             )
             RowDivider()
             SettingsRow(
@@ -663,6 +809,49 @@ fun SettingsScreen(
         }
     }
 
+    if (pickingDownloadQuality) {
+        ModalBottomSheet(
+            onDismissRequest = { pickingDownloadQuality = false },
+            containerColor = MaterialTheme.colorScheme.background,
+        ) {
+            DownloadQualitySheet(
+                selected = downloadQuality,
+                onSelect = { quality ->
+                    AppSettings.setDownloadQuality(quality)
+                    pickingDownloadQuality = false
+                },
+            )
+        }
+    }
+
+    // Asked before the picker opens rather than after a file is chosen: the
+    // thing being confirmed is that this device's own history is about to be
+    // thrown away, and that is true whichever file gets picked.
+    if (confirmImport) {
+        AlertDialog(
+            onDismissRequest = { confirmImport = false },
+            title = { Text("Import a backup?") },
+            text = {
+                Text(
+                    "This replaces the settings and the listening history on this device " +
+                        "with whatever is in the file. What is here now cannot be got back, " +
+                        "so export it first if you want to keep it.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmImport = false
+                    importPicker.launch(arrayOf("application/json", "text/plain", "*/*"))
+                }) {
+                    Text("Choose file")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmImport = false }) { Text("Cancel") }
+            },
+        )
+    }
+
     if (showListenBrainzTokenDialog) {
         var tokenInput by remember { mutableStateOf(listenBrainzToken) }
         AlertDialog(
@@ -735,10 +924,10 @@ fun SettingsScreen(
                         lastfmError = null
                         scrobbleScope.launch {
                             try {
-                                // Use default keys for now
+                                // Use the credentials supplied for this build.
                                 LastFM.initialize(
-                                    apiKey = LastFM.FALLBACK_COMPAT_API_KEY,
-                                    secret = LastFM.FALLBACK_COMPAT_SECRET,
+                                    apiKey = AppSettings.lastfmApiKey.value,
+                                    secret = AppSettings.lastfmSecret.value,
                                 )
                                 LastFM.getMobileSession(usernameInput.trim(), passwordInput)
                                     .onSuccess { auth ->
@@ -771,6 +960,10 @@ fun SettingsScreen(
     }
 }
 
+/** "3 months of listening" — the unit a backup is actually measured in. */
+private fun countOfMonths(months: Int): String =
+    if (months == 0) "no listening history" else "$months month${if (months == 1) "" else "s"} of listening"
+
 /** Which ceiling the open picker is editing. */
 private enum class QualityTarget(val title: String, val icon: ImageVector) {
     WIFI("Wi-Fi", Icons.Rounded.Wifi),
@@ -778,14 +971,6 @@ private enum class QualityTarget(val title: String, val icon: ImageVector) {
 }
 
 private fun openEqualizer(context: Context, sessionId: Int) {
-    if (sessionId == 0) {
-        Toast.makeText(
-            context,
-            "Play a track first, then open the equalizer",
-            Toast.LENGTH_SHORT,
-        ).show()
-        return
-    }
     val intent = Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL).apply {
         putExtra(AudioEffect.EXTRA_AUDIO_SESSION, sessionId)
         putExtra(AudioEffect.EXTRA_PACKAGE_NAME, context.packageName)
@@ -796,22 +981,6 @@ private fun openEqualizer(context: Context, sessionId: Int) {
     }
 }
 
-/**
- * Hands the user to whatever owns Dolby Atmos on this device. Nothing in the
- * public API lets an app flip that switch itself, so the honest move is to open
- * the panel rather than pretend the row can do it.
- */
-private fun openAtmosSettings(context: Context) {
-    val intent = DolbyAtmos.settingsIntent(context)
-    if (intent == null) {
-        Toast.makeText(context, "No Dolby Atmos panel on this device", Toast.LENGTH_SHORT).show()
-        return
-    }
-    runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.onFailure {
-        Toast.makeText(context, "Couldn't open Dolby Atmos settings", Toast.LENGTH_SHORT).show()
-    }
-}
-
 /** Above this, the cache limit slider's subtitle warns rather than reassures. */
 private const val CACHE_WARNING_MB = 2048
 
@@ -819,7 +988,7 @@ private const val CACHE_WARNING_MB = 2048
 private fun formatCacheSize(mb: Int): String {
     if (mb < 1024) return "$mb MB"
     val gb = mb / 1024f
-    return if (gb == gb.toInt().toFloat()) "${gb.toInt()} GB" else "%.1f GB".format(gb)
+    return if (gb == gb.toInt().toFloat()) "${gb.toInt()} GB" else "%.1f GB".format(Locale.ROOT, gb)
 }
 
 /** Who you're signed in as, straight from YouTube Music's account menu. */
@@ -914,7 +1083,7 @@ private fun QualitySheet(
                     color = MaterialTheme.colorScheme.onBackground,
                 )
                 Text(
-                    text = "While on ${target.title.lowercase()}",
+                    text = "While on ${target.title.lowercase(Locale.ROOT)}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -961,6 +1130,88 @@ private fun QualitySheet(
     }
 }
 
+/**
+ * What to keep when a track is saved, with what each rung costs on disk.
+ *
+ * Priced per track rather than per hour, the way [QualitySheet] is. That sheet
+ * is answering "what will listening cost me this hour", because a stream is
+ * spent again on every replay; this one is answering "what will keeping this
+ * cost me", and the answer is charged once. Same widget, different question, so
+ * the numbers beside the options are in different units on purpose.
+ */
+@Composable
+private fun DownloadQualitySheet(
+    selected: DownloadQuality,
+    onSelect: (DownloadQuality) -> Unit,
+) {
+    val haptics = LocalHapticFeedback.current
+    Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+        Row(
+            modifier = Modifier.padding(start = 22.dp, end = 22.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Download,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onBackground,
+                modifier = Modifier.size(22.dp),
+            )
+            Spacer(Modifier.width(14.dp))
+            Column {
+                Text(
+                    text = "Download quality",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onBackground,
+                )
+                Text(
+                    text = "For files kept on this device",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outline)
+
+        // Best first, matching [QualitySheet] — and here the best rung is also
+        // the default, so the checkmark starts where the eye does.
+        DownloadQuality.entries.reversed().forEach { quality ->
+            val chosen = quality == selected
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        onSelect(quality)
+                    }
+                    .padding(horizontal = 22.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = quality.label,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                    Text(
+                        text = "${quality.detail} · ${quality.perTrack} per track",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (chosen) {
+                    Spacer(Modifier.width(12.dp))
+                    Icon(
+                        Icons.Rounded.Check,
+                        contentDescription = "Selected",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
 // ---- Building blocks --------------------------------------------------------
 
 internal val GroupShape = RoundedCornerShape(14.dp)
@@ -984,7 +1235,7 @@ internal fun SettingsGroup(
 ) {
     if (header != null) {
         Text(
-            text = header.uppercase(),
+            text = header.uppercase(Locale.ROOT),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(
@@ -1104,11 +1355,54 @@ internal fun SettingsRow(
     }
 }
 
+/**
+ * A toggle that reads as part of the option above it rather than a setting
+ * of its own: no icon, no divider, and pulled up close against its parent
+ * instead of getting the same breathing room a full [SettingsRow] gets.
+ */
+@Composable
+internal fun SettingsSubRow(
+    title: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    badge: String? = null,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onCheckedChange(!checked) }
+            .padding(start = ROW_INSET, end = ROW_INSET, top = 0.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onBackground,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (badge != null) {
+                Spacer(Modifier.width(8.dp))
+                Badge(badge)
+            }
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedTrackColor = MaterialTheme.colorScheme.primary,
+                checkedBorderColor = MaterialTheme.colorScheme.primary,
+            ),
+        )
+    }
+}
+
 /** Marks the connection whose ceiling is actually in force right now. */
 @Composable
 internal fun Badge(text: String) {
     Text(
-        text = text.uppercase(),
+        text = text.uppercase(Locale.ROOT),
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier
